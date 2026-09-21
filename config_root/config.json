@@ -1,0 +1,106 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "theme": "opencode",
+  "model": "anthropic/claude-sonnet-4-5",
+  "autoupdate": "notify",
+  "share": "disabled",
+  "watcher": {
+    "ignore": [
+      "node_modules/**",
+      ".git/**",
+      "secrets/**",
+      "*.log",
+      "dist/**",
+      "build/**",
+      ".cache/**"
+    ]
+  },
+  "enabled_providers": ["anthropic"],
+  "disabled_providers": ["openai", "gemini", "groq"],
+  "permission": {
+    "bash": "ask",
+    "edit": "ask",
+    "task": "ask",
+    "read": "allow",
+    "write": "ask",
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "patch": "ask",
+    "todowrite": "allow",
+    "todoread": "allow"
+  },
+  "experimental": {
+    "policies": [
+      {
+        "effect": "deny",
+        "action": "provider.use",
+        "resource": "openai"
+      },
+      {
+        "effect": "deny",
+        "action": "provider.use",
+        "resource": "gemini"
+      },
+      {
+        "effect": "deny",
+        "action": "bash.execute",
+        "resource": "rm -rf *"
+      },
+      {
+        "effect": "deny",
+        "action": "bash.execute",
+        "resource": "curl * | bash"
+      },
+      {
+        "effect": "allow",
+        "action": "file.read",
+        "resource": "**/*.md"
+      },
+      {
+        "effect": "allow",
+        "action": "file.write",
+        "resource": "**/*.md"
+      }
+    ]
+  },
+  "plugins": [
+    "opencode-rules"
+  ],
+  "provider": {
+    "custom-gateway": {
+      "options": {
+        "baseURL": "https://internal.corp/api/v1",
+        "timeout": 300000,
+        "maxRetries": 3
+      }
+    }
+  },
+  "rules": {
+    "include": [
+      "rules/**/*.md"
+    ],
+    "exclude": [
+      "rules/drafts/**"
+    ]
+  },
+  "hooks": {
+    "preToolUse": [],
+    "postToolUse": [],
+    "notification": []
+  },
+  "agent": {
+    "defaultModel": "anthropic/claude-sonnet-4-5",
+    "maxTokens": 8192,
+    "temperature": 0.1
+  },
+  "logging": {
+    "level": "info",
+    "format": "json",
+    "destination": "file",
+    "filePath": "~/.config/opencode/logs/opencode.log"
+  },
+  "telemetry": {
+    "enabled": false
+  }
+}

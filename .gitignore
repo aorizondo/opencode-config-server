@@ -1,0 +1,84 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment files (secrets!)
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+/var/log/opencode/
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Distribution / Packaging
+build/
+dist/
+*.egg-info/
+*.whl
+
+# Docker
+.dockerignore
+
+# Local config overrides (no commitear configs reales de usuarios)
+config_root/local/
+out_of_band/local/
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Editor backup files
+*.bak
+*.orig
+
+# Secrets (por si acaso)
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets.yaml
+secrets.yml
+
+# Node (si se usa para algo)
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Go (si se usa)
+vendor/
+
+# Rust (si se usa)
+target/
+Cargo.lock

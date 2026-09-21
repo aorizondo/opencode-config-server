@@ -1,0 +1,332 @@
+# Oh-My-Opencode Enterprise Configuration
+# Este archivo se despliega en ~/.omo/config.yaml
+
+version: "1.0"
+
+# Configuración del motor de ejecución
+engine:
+  # Ruta al binario de opencode (se resuelve via PATH o variable de entorno)
+  binary: "opencode"
+  
+  # Directorio de trabajo por defecto
+  workdir: "~/workspace"
+  
+  # Timeout para comandos largos (ms)
+  command_timeout: 300000
+  
+  # Configuración de red
+  network:
+    # Proxy corporativo si aplica
+    proxy: "http://proxy.corp:8080"
+    # No proxy para dominios internos
+    no_proxy: "localhost,127.0.0.1,.corp,.internal"
+    # Timeout de conexión
+    connect_timeout: 30000
+
+# Perfiles de configuración por entorno
+profiles:
+  # Perfil de desarrollo local
+  development:
+    model: "anthropic/claude-sonnet-4-5"
+    temperature: 0.2
+    max_tokens: 8192
+    permissions:
+      bash: "ask"
+      edit: "ask"
+      task: "ask"
+    plugins:
+      - "opencode-rules"
+    env:
+      LOG_LEVEL: "debug"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4317"
+  
+  # Perfil de staging/pre-producción
+  staging:
+    model: "anthropic/claude-sonnet-4-5"
+    temperature: 0.1
+    max_tokens: 8192
+    permissions:
+      bash: "deny"
+      edit: "ask"
+      task: "ask"
+    plugins:
+      - "opencode-rules"
+    env:
+      LOG_LEVEL: "info"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "https://otel.staging.corp"
+  
+  # Perfil de producción (solo lectura/consulta)
+  production:
+    model: "anthropic/claude-sonnet-4-5"
+    temperature: 0.0
+    max_tokens: 4096
+    permissions:
+      bash: "deny"
+      edit: "deny"
+      task: "deny"
+      read: "allow"
+      glob: "allow"
+      grep: "allow"
+    plugins:
+      - "opencode-rules"
+    env:
+      LOG_LEVEL: "warn"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "https://otel.prod.corp"
+
+# Configuración de plugins empresariales
+plugins:
+  # Configuración de opencode-rules
+  opencode-rules:
+    enabled: true
+    rules_directories:
+      - "~/.config/opencode/rules"
+      - "~/.config/opencode/rules/custom"
+    auto_load: true
+    strict_mode: true
+    # Reglas obligatorias que no se pueden deshabilitar
+    mandatory_rules:
+      - "coding-standards"
+      - "security-policies"
+      - "git-workflow"
+  
+  # Plugin personalizado corporativo (ejemplo)
+  corp-custom:
+    enabled: true
+    config:
+      jira:
+        base_url: "https://jira.corp"
+        api_version: "2"
+      confluence:
+        base_url: "https://wiki.corp"
+      gitlab:
+        base_url: "https://gitlab.corp"
+        api_version: "v4"
+
+# Configuración de agentes predefinidos
+agents:
+  # Agente para revisiones de código
+  code-reviewer:
+    model: "anthropic/claude-sonnet-4-5"
+    system_prompt: |
+      Eres un revisor de código senior. Enfócate en:
+      1. Correctness y edge cases
+      2. Seguridad (OWASP Top 10)
+      3. Rendimiento y complejidad
+      4. Mantenibilidad y legibilidad
+      5. Cumplimiento de estándares corporativos
+      Sé constructivo pero riguroso.
+    temperature: 0.1
+    permissions:
+      read: "allow"
+      glob: "allow"
+      grep: "allow"
+      edit: "deny"
+  
+  # Agente para generación de tests
+  test-generator:
+    model: "anthropic/claude-sonnet-4-5"
+    system_prompt: |
+      Genera tests exhaustivos siguiendo:
+      - AAA pattern (Arrange, Act, Assert)
+      - Cobertura de edge cases y error paths
+      - Property-based testing donde aplique
+      - Mocks mínimos, prefiere fakes
+      - Nomenclatura descriptiva
+    temperature: 0.2
+    permissions:
+      read: "allow"
+      write: "allow"
+      edit: "allow"
+  
+  # Agente para documentación
+  docs-writer:
+    model: "anthropic/claude-sonnet-4-5"
+    system_prompt: |
+      Escribe documentación técnica clara:
+      - Audiencia: desarrolladores senior
+      - Formato: Markdown con diagramas Mermaid
+      - Incluye ejemplos de código funcionales
+      - Documenta APIs con OpenAPI/Swagger
+      - Mantén changelog actualizado
+    temperature: 0.3
+    permissions:
+      read: "allow"
+      write: "allow"
+      edit: "allow"
+
+# Configuración de hooks globales
+hooks:
+  # Pre-tool use: validaciones antes de ejecutar herramientas
+  pre_tool_use:
+    - name: "security-scan"
+      command: "opencode-rules scan --tool {{tool_name}} --args {{tool_args}}"
+      timeout: 5000
+      on_failure: "block"
+  
+  # Post-tool use: logging, métricas
+  post_tool_use:
+    - name: "audit-log"
+      command: "logger -t opencode '{{tool_name}} executed by {{user}}'"
+      async: true
+  
+  # Notificaciones
+  notification:
+    - name: "slack-alert"
+      condition: "tool_result.error && tool_name == 'bash'"
+      webhook: "https://hooks.slack.corp/services/XXX/YYY/ZZZ"
+
+# Configuración de telemetría (opcional, deshabilitada por defecto)
+telemetry:
+  enabled: false
+  endpoint: "https://telemetry.corp/collect"
+  sample_rate: 0.1
+  # Qué eventos enviar
+  events:
+    - "session_start"
+    - "session_end"
+    - "tool_use"
+    - "error"
+  # Qué datos NO enviar nunca
+  pii_filters:
+    - "api_key"
+    - "password"
+    - "token"
+    - "secret"
+    - "authorization"
+    - "cookie"
+
+# Configuración de cache
+cache:
+  # Directorio de cache
+  directory: "~/.cache/opencode"
+  # Tamaño máximo (MB)
+  max_size_mb: 1024
+  # TTL por defecto (días)
+  default_ttl_days: 30
+  # Políticas de limpieza
+  cleanup:
+    on_startup: true
+    on_shutdown: false
+    max_age_days: 90
+
+# Configuración de actualizaciones
+updates:
+  # Canal de actualizaciones
+  channel: "stable"  # stable, beta, nightly
+  # Verificar al inicio
+  check_on_startup: true
+  # Auto-update (solo notificar en empresa)
+  auto_update: false
+  # Notificar cuando hay actualización
+  notify: true
+  # Registro de versiones permitidas (pinning)
+  allowed_versions:
+    - ">=1.0.0 <2.0.0"
+
+# Configuración de logging
+logging:
+  level: "info"  # debug, info, warn, error
+  format: "json"  # json, text, pretty
+  output: "file"  # stdout, stderr, file, both
+  file:
+    path: "~/.config/opencode/logs/opencode.log"
+    max_size_mb: 100
+    max_files: 10
+    compress: true
+  # Campos adicionales en logs
+  extra_fields:
+    environment: "corporate"
+    team: "{{OMO_TEAM:-unknown}}"
+    host: "{{HOSTNAME}}"
+
+# Configuración de integraciones externas
+integrations:
+  # Jira
+  jira:
+    enabled: true
+    base_url: "https://jira.corp"
+    auth:
+      type: "oauth2"
+      token_env: "JIRA_OAUTH_TOKEN"
+    default_project: "ENG"
+  
+  # GitLab
+  gitlab:
+    enabled: true
+    base_url: "https://gitlab.corp"
+    auth:
+      type: "pat"
+      token_env: "GITLAB_PAT"
+  
+  # Slack
+  slack:
+    enabled: true
+    webhook_env: "SLACK_WEBHOOK_URL"
+    channels:
+      alerts: "#eng-alerts"
+      deployments: "#deployments"
+      code-review: "#code-review"
+  
+  # PagerDuty
+  pagerduty:
+    enabled: false
+    integration_key_env: "PAGERDUTY_KEY"
+    service_id: "PXXXXXX"
+
+# Configuración de seguridad adicional
+security:
+  # Validación de comandos peligrosos
+  dangerous_commands:
+    block:
+      - "rm -rf /"
+      - "rm -rf /*"
+      - "dd if=/dev/zero"
+      - "mkfs"
+      - "fdisk"
+      - ":(){ :|:& };:"  # fork bomb
+    warn:
+      - "chmod 777"
+      - "chown -R"
+      - "sudo"
+      - "curl * | bash"
+      - "wget * | bash"
+  
+  # Paths permitidos para operaciones de archivo
+  allowed_paths:
+    - "~/workspace/**"
+    - "~/projects/**"
+    - "/tmp/opencode/**"
+    - "~/.config/opencode/**"
+    - "~/.omo/**"
+  
+  # Paths bloqueados
+  blocked_paths:
+    - "/etc/**"
+    - "/root/**"
+    - "/var/**"
+    - "/usr/**"
+    - "~/.ssh/**"
+    - "~/.aws/**"
+    - "~/.kube/**"
+    - "~/.docker/**"
+
+# Variables de entorno por defecto (se mezclan con .opencode.env)
+environment:
+  # Configuración de modelo
+  OPENCODE_DEFAULT_MODEL: "anthropic/claude-sonnet-4-5"
+  OPENCODE_DEFAULT_PROVIDER: "custom-gateway"
+  
+  # Configuración de red
+  HTTP_PROXY: "http://proxy.corp:8080"
+  HTTPS_PROXY: "http://proxy.corp:8080"
+  NO_PROXY: "localhost,127.0.0.1,.corp,.internal"
+  
+  # Configuración de runtime
+  NODE_OPTIONS: "--max-old-space-size=4096"
+  PYTHONPATH: "~/workspace:~/workspace/src"
+  GOFLAGS: "-mod=mod"
+  
+  # Feature flags
+  OPENCODE_FEATURE_RULES: "true"
+  OPENCODE_FEATURE_PLUGINS: "true"
+  OPENCODE_FEATURE_HOOKS: "true"

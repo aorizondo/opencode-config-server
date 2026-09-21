@@ -1,0 +1,153 @@
+version: '3.8'
+
+services:
+  # Servidor principal de configuración OpenCode
+  opencode-config:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # Para desarrollo, usar target builder para hot reload
+      # target: builder
+    container_name: opencode-enterprise-config
+    hostname: opencode-config
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Configuración del servidor
+      - SERVER_BASE_URL=https://opencode-config.tu-empresa.corp
+      # OAuth2 - Configurar con tus valores reales
+      - OAUTH2_TOKEN_URL=https://auth.tu-empresa.corp/oauth2/token
+      - OAUTH2_AUDIENCE=opencode-enterprise
+      - OAUTH2_ISSUER=https://auth.tu-empresa.corp
+      - JWKS_URL=https://auth.tu-empresa.corp/.well-known/jwks.json
+      # Paths de configuración (dentro del contenedor)
+      - CONFIG_ROOT=/app/config_root
+      - OUT_OF_BAND_ROOT=/app/out_of_band
+      # Variables de entorno para el bootstrap script (se inyectan en .opencode.env)
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENCODE_JIRA_TOKEN=${OPENCODE_JIRA_TOKEN:-}
+    volumes:
+      # Montar configuración para desarrollo (opcional, quitar en prod)
+      # - ./config_root:/app/config_root:ro
+      # - ./out_of_band:/app/out_of_band:ro
+      # Logs persistentes
+      - opencode-logs:/var/log/opencode
+    networks:
+      - opencode-network
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  # Reverse proxy con TLS termination (Traefik)
+  # Descomenta y configura si no tienes un ingress controller externo
+  # traefik:
+  #   image: traefik:v3.0
+  #   container_name: opencode-traefik
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock:ro
+  #     - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+  #     - ./traefik/certs:/etc/traefik/certs:ro
+  #     - traefik-logs:/var/log/traefik
+  #     - traefik-acme:/etc/traefik/acme
+  #   networks:
+  #     - opencode-network
+  #   labels:
+  #     - "traefik.enable=true"
+  #     - "traefik.http.routers.opencode-config.rule=Host(`opencode-config.tu-empresa.corp`)"
+  #     - "traefik.http.routers.opencode-config.tls=true"
+  #     - "traefik.http.routers.opencode-config.tls.certresolver=letsencrypt"
+  #     - "traefik.http.services.opencode-config.loadbalancer.server.port=8000"
+
+  # Prometheus para métricas (opcional)
+  # prometheus:
+  #   image: prom/prometheus:v2.48
+  #   container_name: opencode-prometheus
+  #   restart: unless-stopped
+  #   ports:
+  #     - "9090:9090"
+  #   volumes:
+  #     - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  #     - prometheus-data:/prometheus
+  #   networks:
+  #     - opencode-network
+  #   command:
+  #     - '--config.file=/etc/prometheus/prometheus.yml'
+  #     - '--storage.tsdb.path=/prometheus'
+  #     - '--web.console.libraries=/etc/prometheus/console_libraries'
+  #     - '--web.console.templates=/etc/prometheus/consoles'
+  #     - '--web.enable-lifecycle'
+
+  # Grafana para dashboards (opcional)
+  # grafana:
+  #   image: grafana/grafana:10.2
+  #   container_name: opencode-grafana
+  #   restart: unless-stopped
+  #   ports:
+  #     - "3000:3000"
+  #   volumes:
+  #     - grafana-data:/var/lib/grafana
+  #     - ./grafana/provisioning:/etc/grafana/provisioning:ro
+  #   environment:
+  #     - GF_SECURITY_ADMIN_USER=admin
+  #     - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+  #     - GF_USERS_ALLOW_SIGN_UP=false
+  #   networks:
+  #     - opencode-network
+
+networks:
+  opencode-network:
+    driver: bridge
+    name: opencode-network
+    # Para producción, usar overlay network en Swarm/K8s
+    # driver: overlay
+    # attachable: true
+
+volumes:
+  opencode-logs:
+    driver: local
+  # traefik-logs:
+  #   driver: local
+  # traefik-acme:
+  #   driver: local
+  # prometheus-data:
+  #   driver: local
+  # grafana-data:
+  #   driver: local
+
+# Para deploy en Docker Swarm, descomenta:
+# deploy:
+#   replicas: 2
+#   placement:
+#     constraints:
+#       - node.role == worker
+#   update_config:
+#     parallelism: 1
+#     delay: 10s
+#     failure_action: rollback
+#     monitor: 60s
+#   rollback_config:
+#     parallelism: 0
+#     delay: 0s
+#     failure_action: pause
+#     monitor: 60s
