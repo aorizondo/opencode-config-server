@@ -355,7 +355,6 @@ class TestBootstrapScriptEndpoint:
         
         assert 'TARGET_DIR="$HOME/.config/opencode"' in script
         assert 'STATE_FILE="$TARGET_DIR/.enterprise_hash"' in script
-        assert 'OMO_DIR="$HOME/.omo"' in script
         
         assert "REMOTE_STATE=" in script
         assert "REMOTE_HASH=" in script
@@ -365,12 +364,10 @@ class TestBootstrapScriptEndpoint:
         assert "bundle.tar.gz" in script
         assert "tar -xzf" in script
         
-        assert "out_of_band/omo/config.yaml" in script
-        
-        assert ".opencode.env" in script
-        assert "ANTHROPIC_API_KEY" in script
-        assert "OPENCODE_JIRA_TOKEN" in script
-        assert "OMO_ENGINE_ROUTE" in script
+        # Nuevo: merge script download and execution
+        assert "merge.py" in script
+        assert "MERGE_SCRIPT" in script
+        assert 'python3 "$MERGE_SCRIPT"' in script
         
         assert ".bashrc" in script
         assert ".zshrc" in script

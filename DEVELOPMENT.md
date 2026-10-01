@@ -377,6 +377,114 @@ resources:
 
 ---
 
+## Merge Inteligente (User-Wins)
+
+### Filosofía
+
+El bootstrap script ahora implementa un **merge inteligente** que preserva la configuración del usuario. La organización provee valores por defecto, pero el usuario siempre gana: su configuración existente nunca se sobrescribe.
+
+### Estrategias de Merge por Tipo
+
+| Archivo/Tipo | Estrategia | Comportamiento |
+|--------------|------------|----------------|
+| `config.json` | Deep merge | Merge recursivo de objetos. Valores del usuario prevalecen. Nuevas keys de la org se añaden. |
+| `~/.omo/config.yaml` | Deep merge | Igual que JSON. Perfiles, agentes, integraciones del usuario se preservan. |
+| `rules/*.md` | Add-only | Solo copia archivos `.md` que NO existan localmente. Reglas del usuario intactas. |
+| `plugins/*.js` | Add-only | Solo añade plugins nuevos. |
+| `~/.opencode.env` | Merge vars | Lee vars existentes. Solo añade vars de la org que falten. Usuario gana siempre. |
+
+### Flujo de Merge
+
+```
+1. Descarga bundle.tar.gz → directorio temporal
+2. Extrae a /tmp/merge/remote/
+3. Ejecuta merge_script.py(target_dir, remote_dir)
+   ├── deep_merge_json(~/.config/opencode/config.json, remote/config.json)
+   ├── merge_rules(~/.config/opencode/rules/, remote/rules/)  # solo add
+   ├── merge_rules(~/.config/opencode/plugins/, remote/plugins/)  # solo add
+   ├── deep_merge_yaml(~/.omo/config.yaml, remote/config.yaml)
+   └── merge_env(~/.opencode.env, org_env_vars)  # solo vars faltantes
+4. Limpia directorio temporal
+5. Actualiza .enterprise_hash
+```
+
+### Ejemplos de Comportamiento
+
+#### config.json - Usuario añade proveedor personalizado
+```json
+// Usuario tiene:
+{ "model": "mi-modelo", "provider": { "mi-proxy": { "url": "https://proxy" } } }
+
+// Org actualiza:
+{ "model": "org-model", "provider": { "org-gateway": { "url": "https://org" } } }
+
+// Resultado (merge):
+{ 
+  "model": "mi-modelo",           // ← Usuario gana
+  "provider": { 
+    "mi-proxy": { "url": "https://proxy" },  // ← Usuario gana
+    "org-gateway": { "url": "https://org" }  // ← Org se añade
+  }
+}
+```
+
+#### Rules - Usuario personaliza regla existente
+```bash
+# Usuario tiene: ~/.config/opencode/rules/mi-estilo.md
+# Org añade: rules/nueva-regla.md
+
+# Resultado: Ambas existen. mi-estilo.md NO se sobrescribe.
+```
+
+#### Variables de entorno - Usuario tiene API key propia
+```bash
+# Usuario tiene en ~/.opencode.env:
+export ANTHROPIC_API_KEY="sk-user-key"
+
+# Org provee:
+export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
+
+# Resultado: sk-user-key se preserva (usuario gana)
+```
+
+### Forzar Re-sync Completo (si es necesario)
+
+```bash
+# Eliminar hash para forzar re-merge completo
+rm ~/.config/opencode/.enterprise_hash
+opencode auth login https://config.tu-empresa.corp --token TU_TOKEN
+```
+
+### Verificar Qué Se Mergeó
+
+```bash
+# Ver diff de config.json
+diff -u <(curl -s -H "Auth: Bearer $TOKEN" $URL/cdn/bundle.tar.gz | tar -xzO config.json) ~/.config/opencode/config.json
+
+# Ver variables de entorno finales
+cat ~/.opencode.env
+```
+
+### Personalizar Comportamiento de Merge
+
+Editar `merge_script.py` para ajustar estrategias:
+
+```python
+# Cambiar a "org wins" para una key específica
+def merge_dict(tgt, src):
+    for key, value in src.items():
+        if key in tgt:
+            if isinstance(tgt[key], dict) and isinstance(value, dict):
+                merge_dict(tgt[key], value)
+            # Org wins para claves específicas
+            if key in ["model", "theme"]:  
+                tgt[key] = value
+        else:
+            tgt[key] = value
+```
+
+---
+
 ## Contribuir
 
 ### Flujo de Trabajo

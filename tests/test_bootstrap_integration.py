@@ -68,25 +68,26 @@ class TestBootstrapScriptGeneration:
         assert response.status_code == 200
         script = response.text
         
-        # Verificar elementos clave
+# Verificar elementos clave del nuevo bootstrap con merge inteligente
         assert script.startswith("#!/usr/bin/env bash")
         assert "set -e" in script
         assert 'SERVER_URL="${1}"' in script
         assert 'AUTH_TOKEN="${2}"' in script
-        assert "TARGET_DIR=\"$HOME/.config/opencode\"" in script
+        assert 'TARGET_DIR="$HOME/.config/opencode"' in script
         assert 'STATE_FILE="$TARGET_DIR/.enterprise_hash"' in script
-        assert 'OMO_DIR="$HOME/.omo"' in script
         assert "REMOTE_STATE=" in script
         assert "REMOTE_HASH=" in script
         assert "LOCAL_HASH=" in script
         assert 'if [ "$LOCAL_HASH" = "$REMOTE_HASH" ]' in script
         assert "bundle.tar.gz" in script
         assert "tar -xzf" in script
-        assert "out_of_band/omo/config.yaml" in script
-        assert ".opencode.env" in script
-        assert "ANTHROPIC_API_KEY" in script
-        assert "OPENCODE_JIRA_TOKEN" in script
-        assert "OMO_ENGINE_ROUTE" in script
+        # Nuevo: merge script download and execution
+        assert "merge.py" in script
+        assert "MERGE_SCRIPT" in script
+        assert 'python3 "$MERGE_SCRIPT"' in script
+        # Cleanup
+        assert "rm -rf" in script
+        # Shell RC injection
         assert ".bashrc" in script
         assert ".zshrc" in script
         assert ".opencode.env" in script
@@ -181,10 +182,30 @@ class TestEnvironmentVariableInjection:
 
     @pytest.mark.asyncio
     async def test_env_file_template_contains_vars(self, test_config_root, test_out_of_band_root):
-        """Template del archivo .opencode.env contiene las variables requeridas."""
-        script = await self._get_script(test_config_root, test_out_of_band_root)
+        """Template del archivo .opencode.env contiene las variables requeridas (en merge script)."""
+        # Obtener el merge script
+        import main
+        from main import app, verificar_token_oauth2
         
-        # Verificar que el template cat << 'EOF' contiene las variables
+        with patch.object(main, 'CONFIG_ROOT', str(test_config_root)), \
+             patch.object(main, 'OUT_OF_BAND_ROOT', str(test_out_of_band_root)), \
+             patch.object(main, 'SERVER_BASE_URL', 'http://testserver'), \
+             patch.object(main, 'OAUTH2_TOKEN_URL', 'https://auth.test/oauth2/token'), \
+             patch.object(main, 'AUDIENCE', 'test-audience'), \
+             patch.object(main, 'ISSUER', 'https://auth.test'), \
+             patch.object(main, 'JWKS_URL', 'https://auth.test/.well-known/jwks.json'):
+            
+            def mock_verify_token():
+                return "test-token"
+            app.dependency_overrides[verificar_token_oauth2] = mock_verify_token
+            
+            async with AsyncTestClient(app) as client:
+                response = await client.get("/cdn/merge.py")
+                script = response.text
+            
+            app.dependency_overrides.clear()
+        
+        # Verificar que el template contiene las variables requeridas
         assert "ANTHROPIC_API_KEY" in script
         assert "OPENCODE_JIRA_TOKEN" in script
         assert "OMO_ENGINE_ROUTE" in script

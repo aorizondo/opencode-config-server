@@ -115,10 +115,14 @@ async def obtener_estado_actual(token: str = Depends(verificar_token_oauth2)):
 
 @app.get("/cdn/bundle.tar.gz")
 async def obtener_paquete_configuracion(token: str = Depends(verificar_token_oauth2)):
-    """Empaqueta dinámicamente config_root para la máquina cliente."""
+    """Empaqueta dinámicamente config_root y out_of_band para la máquina cliente."""
     io_stream = BytesIO()
     with tarfile.open(fileobj=io_stream, mode="w:gz") as tar:
         tar.add(CONFIG_ROOT, arcname=".")
+        # Añadir config OMO en la raíz para que el merge script la encuentre
+        omo_config = os.path.join(OUT_OF_BAND_ROOT, "omo", "config.yaml")
+        if os.path.exists(omo_config):
+            tar.add(omo_config, arcname="config.yaml")
     io_stream.seek(0)
     return StreamingResponse(io_stream, media_type="application/gzip")
 
@@ -133,9 +137,20 @@ async def obtener_configuracion_omo(token: str = Depends(verificar_token_oauth2)
     raise HTTPException(status_code=404, detail="Archivo de configuración OMO no encontrado en el servidor.")
 
 
+@app.get("/cdn/merge.py")
+async def obtener_merge_script(token: str = Depends(verificar_token_oauth2)):
+    """Sirve el script de merge inteligente."""
+    merge_script_path = os.path.join(os.path.dirname(__file__), "merge_script.py")
+    if os.path.exists(merge_script_path):
+        with open(merge_script_path, 'r', encoding='utf-8') as f:
+            return Response(content=f.read(), media_type="text/x-python")
+    raise HTTPException(status_code=404, detail="Script de merge no encontrado.")
+
+
 @app.get("/cdn/bootstrap.sh")
 async def obtener_script_bootstrap(token: str = Depends(verificar_token_oauth2)):
-    """Genera y sirve el script de bootstrap incremental."""
+    """Genera y sirve el script de bootstrap incremental con merge inteligente."""
+    base_url = SERVER_BASE_URL
     script = f"""#!/usr/bin/env bash
 set -e
 
@@ -167,37 +182,34 @@ if [ "$LOCAL_HASH" = "$REMOTE_HASH" ] && [ -n "$LOCAL_HASH" ]; then
     exit 0
 fi
 
-echo "[Corp OS] Sincronizando cambios detectados en las reglas y plugins..." >&2
+echo "[Corp OS] Sincronizando cambios detectados (merge inteligente)..." >&2
 
-# 2. Descarga incremental y extracción controlada en la ruta de OpenCode
-TMP_TAR=$(mktemp)
+# 2. Descargar bundle a directorio temporal
+TMP_DIR=$(mktemp -d)
+TMP_TAR="$TMP_DIR/bundle.tar.gz"
 curl -fsSL -H "Authorization: Bearer $AUTH_TOKEN" "$SERVER_URL/cdn/bundle.tar.gz" -o "$TMP_TAR"
-tar -xzf "$TMP_TAR" -C "$TARGET_DIR"
-rm -f "$TMP_TAR"
+
+# Extraer a directorio temporal de merge
+MERGE_SRC="$TMP_DIR/remote"
+mkdir -p "$MERGE_SRC"
+tar -xzf "$TMP_TAR" -C "$MERGE_SRC"
+
+# 3. Descargar y ejecutar script de merge inteligente (Python) - usuario gana
+MERGE_SCRIPT="$TMP_DIR/merge.py"
+curl -fsSL -H "Authorization: Bearer $AUTH_TOKEN" "$SERVER_URL/cdn/merge.py" -o "$MERGE_SCRIPT"
+python3 "$MERGE_SCRIPT" "$TARGET_DIR" "$MERGE_SRC"
+
+if [ $? -ne 0 ]; then
+    echo "[Corp OS] Error durante el merge inteligente" >&2
+    exit 1
+fi
+
+# Limpiar directorio temporal
+rm -rf "$TMP_DIR"
 
 # =========================================================================
-# 3. CONFIGURACIÓN FUERA DE LA CARPETA BASE: Oh-My-Opencode (~/.omo)
+# 4. INYECCIÓN DE SHELL RC (solo si no existe)
 # =========================================================================
-OMO_DIR="$HOME/.omo"
-mkdir -p "$OMO_DIR"
-
-# Traer de forma segura el archivo config.yaml compartido de OMO
-curl -fsSL -H "Authorization: Bearer $AUTH_TOKEN" "$SERVER_URL/cdn/out_of_band/omo/config.yaml" -o "$OMO_DIR/config.yaml" 2>/dev/null || true
-
-
-# =========================================================================
-# 4. VARIABLES DE ENTORNO FIJAS Y COMPARTIDAS (API Keys Empresariales)
-# =========================================================================
-ENV_FILE="$HOME/.opencode.env"
-cat << 'EOF' > "$ENV_FILE"
-# CONFIGURACIÓN DE ENTORNO CORPORATIVO COMPARTIDO
-export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
-export OPENCODE_JIRA_TOKEN="${OPENCODE_JIRA_TOKEN:-}"
-export OMO_ENGINE_ROUTE="https://internal.corp"
-export OPENCODE_RULES_STRICT_MODE="true"
-EOF
-
-# Inyectar el puente de lectura automática en los perfiles de la shell del sistema local
 vincular_entorno_a_shell() {{
     local shell_config="$1"
     if [ -f "$shell_config" ]; then
@@ -215,7 +227,7 @@ vincular_entorno_a_shell "$HOME/.zshrc"
 # 5. Guardar la huella digital para evitar ejecuciones duplicadas innecesarias
 echo "$REMOTE_HASH" > "$STATE_FILE"
 
-echo "[Corp OS] Actualización incremental completada con éxito." >&2
+echo "[Corp OS] Merge inteligente completado con éxito. Configuración de usuario preservada." >&2
 
 # Salida obligatoria para que el CLI de OpenCode mantenga la sesión viva
 echo "$AUTH_TOKEN"
