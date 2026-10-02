@@ -1,25 +1,4 @@
-# Dependencias de producción para OpenCode Enterprise Config Server
-# Generado desde pyproject.toml - mantener sincronizado
-
-# Web framework
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-
-# Validación y serialización
-pydantic==2.5.3
-pydantic-settings==2.1.0
-
-# Autenticación OAuth2/JWT
-python-jose[cryptography]==3.3.0
-python-multipart==0.0.6
-
-# Configuración y entorno
-python-dotenv==1.0.0
-
-# Utilidades
-pyyaml==6.0.1
-
-# Testing (opcional, para desarrollo)
-# pytest==7.4.4
-# pytest-asyncio==0.23.3
-# httpx==0.26.0
+# Production dependencies. Deliberately small: no JWT library (tokens are HMAC
+# from the stdlib), no YAML, no form parsing, no dotenv.
+fastapi==0.120.4
+uvicorn[standard]==0.38.0
