@@ -1,193 +1,108 @@
-# Test configuration and fixtures
-import os
+"""Shared fixtures: an isolated config tree and an ASGI client per test."""
+
+from __future__ import annotations
+
+import json
+import shutil
 import sys
-import tempfile
 from pathlib import Path
-from unittest.mock import patch
 
-import pytest
 import httpx
+import pytest
 
-# Añadir el directorio raíz al path para importar main
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import main
-from main import (
-    app,
-    calcular_hash_directorio,
-    verificar_token_oauth2,
-)
+from opencode_config_server import auth, settings as settings_module  # noqa: E402
+from opencode_config_server.app import create_app  # noqa: E402
 
+REPO_ROOT = Path(__file__).parent.parent
+PASSWORD = "corp-password-1234"
+API_KEY = "ock_test_key_for_ci_runner"
+SECRET = "test-session-secret-not-for-production"
 
-class AsyncTestClient:
-    """Async test client usando httpx.AsyncClient con ASGITransport."""
-    
-    def __init__(self, app, base_url="http://testserver"):
-        self._client = httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url=base_url
-        )
-    
-    async def __aenter__(self):
-        return self
-    
-    async def __aexit__(self, *args):
-        await self.close()
-    
-    async def close(self):
-        await self._client.aclose()
-    
-    async def get(self, url, **kwargs):
-        return await self._client.get(url, **kwargs)
-    
-    async def post(self, url, **kwargs):
-        return await self._client.post(url, **kwargs)
-    
-    async def put(self, url, **kwargs):
-        return await self._client.put(url, **kwargs)
-    
-    async def delete(self, url, **kwargs):
-        return await self._client.delete(url, **kwargs)
-    
-    async def options(self, url, **kwargs):
-        return await self._client.options(url, **kwargs)
-    
-    async def patch(self, url, **kwargs):
-        return await self._client.patch(url, **kwargs)
-
-
-@pytest.fixture(scope="session")
-def test_config_root():
-    """Crear estructura temporal de config_root para tests."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        config_root = Path(tmpdir) / "config_root"
-        config_root.mkdir()
-        
-        # Crear config.json completo (copia del real)
-        (config_root / "config.json").write_text('''{
-  "$schema": "https://opencode.ai/config.json",
-  "theme": "opencode",
-  "model": "test-model",
-  "autoupdate": "notify",
-  "share": "disabled",
-  "watcher": {
-    "ignore": ["node_modules/**", ".git/**"]
-  },
-  "enabled_providers": ["anthropic"],
-  "disabled_providers": ["openai", "gemini"],
-  "permission": {
-    "bash": "ask",
-    "edit": "ask"
-  },
-  "experimental": {
-    "policies": [
-      {"effect": "deny", "action": "provider.use", "resource": "openai"}
-    ]
-  },
-  "plugins": ["opencode-rules"],
-  "provider": {"custom-gateway": {"options": {"baseURL": "https://internal.corp"}}},
-  "rules": {"include": ["rules/**/*.md"]}
-}''')
-        
-        # Crear reglas
-        rules_dir = config_root / "rules"
-        rules_dir.mkdir()
-        (rules_dir / "coding-standards.md").write_text("# Coding Standards\n\n## Principles\n- Use strict typing\n- Document public APIs\n- Test coverage > 80%\n\n## TypeScript\n- Use const by default\n- Prefer interface over type\n- No any or @ts-ignore\n\n## Python\n- Type hints required\n- Use dataclasses/pydantic\n- Ruff for linting\n\n## Security\n- Never commit secrets\n- Validate all inputs\n- Use prepared statements")
-        (rules_dir / "security-policies.md").write_text("# Security Policies\n\n## Secrets\n- No hardcoded credentials\n- Use vault/secrets manager\n- Rotate every 90 days\n\n## Dependencies\n- Scan in CI/CD\n- Block critical/high vulns\n- Update monthly\n\n## Network\n- TLS 1.3 required\n- Auth on all APIs\n- Rate limiting\n\n## Data\n- Encrypt at rest (AES-256)\n- Encrypt in transit (TLS 1.3)\n- Classify data")
-        (rules_dir / "git-workflow.md").write_text("# Git Workflow\n\n## Branches\n- main (protected)\n- feature/*\n- fix/*\n- hotfix/*\n\n## Commits\n- Conventional Commits\n- Atomic commits\n\n## PRs\n- Require review\n- Tests passing\n- Lint clean\n\n## Versioning\n- SemVer\n- Tags: v1.2.3")
-        
-        # Crear plugins
-        plugins_dir = config_root / "plugins"
-        plugins_dir.mkdir()
-        (plugins_dir / "custom.js").write_text("// Custom plugin")
-        
-        yield config_root
-
-
-@pytest.fixture(scope="session")
-def test_out_of_band_root():
-    """Crear estructura temporal de out_of_band para tests."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        out_of_band = Path(tmpdir) / "out_of_band"
-        omo_dir = out_of_band / "omo"
-        omo_dir.mkdir(parents=True)
-        (omo_dir / "config.yaml").write_text("""version: "1.0"
-engine:
-  binary: "opencode"
-  workdir: "~/workspace"
-profiles:
-  development:
-    model: "anthropic/claude-sonnet-4-5"
-    temperature: 0.2
-  staging:
-    model: "anthropic/claude-sonnet-4-5"
-    temperature: 0.1
-  production:
-    model: "anthropic/claude-sonnet-4-5"
-    temperature: 0.0
-plugins:
-  opencode-rules:
-    enabled: true
-    mandatory_rules:
-      - "coding-standards"
-      - "security-policies"
-      - "git-workflow"
-agents:
-  code-reviewer:
-    model: "anthropic/claude-sonnet-4-5"
-  test-generator:
-    model: "anthropic/claude-sonnet-4-5"
-  docs-writer:
-    model: "anthropic/claude-sonnet-4-5"
-integrations:
-  jira:
-    enabled: true
-  gitlab:
-    enabled: true
-  slack:
-    enabled: true
-security:
-  dangerous_commands:
-    block: ["rm -rf /", "curl * | bash"]
-  allowed_paths: ["~/workspace/**"]
-  blocked_paths: ["/etc/**", "~/.ssh/**"]
-""")
-        yield out_of_band
+# Real PBKDF2 at 600k iterations costs ~0.3s per call; tests only need the format.
+TEST_ITERATIONS = 1_000
 
 
 @pytest.fixture
-async def client(test_config_root, test_out_of_band_root):
-    """Cliente de test async con config_root y out_of_band mockeados."""
-    with patch.object(main, 'CONFIG_ROOT', str(test_config_root)), \
-         patch.object(main, 'OUT_OF_BAND_ROOT', str(test_out_of_band_root)), \
-         patch.object(main, 'SERVER_BASE_URL', 'http://testserver'), \
-         patch.object(main, 'OAUTH2_TOKEN_URL', 'https://auth.test/oauth2/token'), \
-         patch.object(main, 'AUDIENCE', 'test-audience'), \
-         patch.object(main, 'ISSUER', 'https://auth.test'), \
-         patch.object(main, 'JWKS_URL', 'https://auth.test/.well-known/jwks.json'):
-        
-        # Override la dependencia de autenticación para tests
-        def mock_verify_token():
-            return "test-token-12345"
-        
-        app.dependency_overrides[verificar_token_oauth2] = mock_verify_token
-        
-        async with AsyncTestClient(app) as test_client:
-            yield test_client
-        
-        app.dependency_overrides.clear()
+def config_dir(tmp_path: Path) -> Path:
+    """A self-contained corporate config tree, seeded from the shipped defaults."""
+    root = tmp_path / "config"
+    root.mkdir()
+    shutil.copy(REPO_ROOT / "config" / "opencode.jsonc", root / "opencode.jsonc")
+
+    (root / "bootstrap").mkdir()
+    (root / "bootstrap" / "install.sh").write_text(
+        "#!/usr/bin/env bash\nset -u\necho 'test bootstrap ran'\ntouch \"${BOOTSTRAP_MARKER:-/dev/null}\"\n",
+        encoding="utf-8",
+    )
+
+    skill = root / "skills" / "corp-standards"
+    (skill / "references").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: corp-standards\ndescription: Corporate rules\n---\n# Rules\n")
+    (skill / "references" / "coding-standards.md").write_text("# Coding\nUse types.\n")
+    (skill / "private.key").write_text("must-never-be-published")
+
+    (root / "users.json").write_text(
+        json.dumps(
+            {
+                "users": [
+                    {
+                        "name": "ana.ruiz",
+                        "password": auth.hash_password(PASSWORD, iterations=TEST_ITERATIONS),
+                        "version": 1,
+                    },
+                    {"name": "ci-runner", "api_keys": [auth.hash_api_key(API_KEY)], "version": 1},
+                    {
+                        "name": "ex.employee",
+                        "password": auth.hash_password(PASSWORD, iterations=TEST_ITERATIONS),
+                        "disabled": True,
+                        "version": 1,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return root
 
 
 @pytest.fixture
-async def client_no_auth(test_config_root, test_out_of_band_root):
-    """Cliente de test async SIN override de autenticación (para testear 401)."""
-    with patch.object(main, 'CONFIG_ROOT', str(test_config_root)), \
-         patch.object(main, 'OUT_OF_BAND_ROOT', str(test_out_of_band_root)), \
-         patch.object(main, 'SERVER_BASE_URL', 'http://testserver'), \
-         patch.object(main, 'OAUTH2_TOKEN_URL', 'https://auth.test/oauth2/token'), \
-         patch.object(main, 'AUDIENCE', 'test-audience'), \
-         patch.object(main, 'ISSUER', 'https://auth.test'), \
-         patch.object(main, 'JWKS_URL', 'https://auth.test/.well-known/jwks.json'):
-        
-        async with AsyncTestClient(app) as test_client:
-            yield test_client
+def settings(config_dir: Path) -> settings_module.Settings:
+    return settings_module.load(
+        base_url="https://cfg.corp.example",
+        config_dir=config_dir,
+        users_file=config_dir / "users.json",
+        session_secret=SECRET,
+        environment="development",
+    )
+
+
+@pytest.fixture
+def app(settings: settings_module.Settings):
+    return create_app(settings)
+
+
+@pytest.fixture
+async def client(app) -> httpx.AsyncClient:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://cfg.corp.example"
+    ) as instance:
+        yield instance
+
+
+@pytest.fixture
+async def token(client: httpx.AsyncClient) -> str:
+    response = await client.post("/auth/token", headers={"X-Api-Key": API_KEY})
+    assert response.status_code == 200, response.text
+    return response.json()["token"]
+
+
+def write_users(config_dir: Path, users: list[dict]) -> None:
+    """Rewrite users.json and make sure the mtime check notices."""
+    path = config_dir / "users.json"
+    path.write_text(json.dumps({"users": users}), encoding="utf-8")
+    stat = path.stat()
+    import os
+
+    os.utime(path, (stat.st_atime + 10, stat.st_mtime + 10))

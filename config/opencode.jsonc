@@ -1,0 +1,75 @@
+// =============================================================================
+// CORPORATE OPENCODE CONFIGURATION
+//
+// Served by GET /config/opencode.json to authenticated clients. The harness
+// loads it as the LOWEST priority document (packages/core/src/config.ts:229):
+// anything the employee writes in ~/.config/opencode wins.
+//
+// Two placeholders are resolved by this server before sending:
+//   {server_url}     -> the public base URL of this server
+//   {session_token}  -> {env:OPENCODE_CORP_SESSION}, filled in locally by the
+//                       harness with that employee's own token
+//
+// {env:NAME} and {file:path} are left alone: the harness resolves both on the
+// employee's machine. Never put a real secret in this file -- every
+// authenticated employee can read it.
+// =============================================================================
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // --- Defaults an employee may override by setting their own value ---------
+  // Keys like `model` and `share` are all-or-nothing: the most specific
+  // document that defines them wins (Config.latest -> findLast).
+  "share": "disabled",
+
+  // --- Permissions: accumulated across documents, evaluated findLast --------
+  // Corporate rules land first, so a local rule can still override them. They
+  // exist as a floor, not a lock.
+  "permissions": [
+    { "action": "shell", "resource": "curl * | *", "effect": "ask" },
+    { "action": "shell", "resource": "sudo *", "effect": "ask" },
+    { "action": "read", "resource": "**/.env", "effect": "deny" },
+    { "action": "read", "resource": "**/.env.*", "effect": "deny" },
+    { "action": "read", "resource": "**/id_rsa", "effect": "deny" },
+    { "action": "read", "resource": "**/.aws/credentials", "effect": "deny" }
+  ],
+
+  // --- Skills: downloaded from this server, no files installed locally ------
+  // The token rides in the path because skill requests carry no headers
+  // (packages/core/src/skill/discovery.ts).
+  "skills": ["{server_url}/skills/{session_token}/"],
+
+  // --- Agents: merged field by field, per id. `update()` creates new ones ---
+  "agents": {
+    "corp-reviewer": {
+      "description": "Reviews a change against the corporate engineering standards",
+      "mode": "subagent",
+      "system": "You review code against the corporate standards published in the corp-standards skill. Read that skill before judging anything. Report findings most severe first, cite file:line, and never rewrite code unless asked."
+    }
+  },
+
+  // --- Commands: inline templates, no .md files to install ------------------
+  "commands": {
+    "corp-review": {
+      "description": "Review the working tree against corporate standards",
+      "template": "Read the corp-standards skill, then review the current diff against it. $ARGUMENTS"
+    }
+  },
+
+  // --- MCP servers: merged by name; a local server with the same name wins --
+  // "mcp": {
+  //   "servers": {
+  //     "corp-docs": {
+  //       "type": "remote",
+  //       "url": "https://docs.corp/mcp",
+  //       "headers": { "authorization": "Bearer {env:CORP_DOCS_TOKEN}" }
+  //     }
+  //   }
+  // },
+
+  // --- Plugins: concatenated across every document -------------------------
+  // Must be an npm spec or an absolute path: relative paths in a remote
+  // document resolve against the employee's cwd (config/plugin/source.ts:139).
+  // An employee can opt out with "-<package>" in their own config.
+  "plugins": []
+}

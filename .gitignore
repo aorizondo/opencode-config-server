@@ -82,3 +82,9 @@ vendor/
 # Rust (si se usa)
 target/
 Cargo.lock
+# Real credentials: never commit these. Only the .example is tracked.
+config/users.json
+config/users.*.json
+
+# Local corporate overrides
+config/opencode.local.jsonc

@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "Copy to users.json. Passwords are PBKDF2 hashes, API keys are SHA-256 digests;",
+    "generate both with: python -m opencode_config_server.passwd [--api-key].",
+    "Bump 'version' to revoke every token already issued to that user.",
+    "Edits are picked up without a restart."
+  ],
+  "users": [
+    {
+      "name": "ana.ruiz",
+      "password": "pbkdf2_sha256$600000$REPLACE_ME$REPLACE_ME",
+      "version": 1
+    },
+    {
+      "name": "ci-runner",
+      "api_keys": ["sha256:0000000000000000000000000000000000000000000000000000000000000000"],
+      "version": 1
+    },
+    {
+      "name": "ex.employee",
+      "password": "pbkdf2_sha256$600000$REPLACE_ME$REPLACE_ME",
+      "version": 1,
+      "disabled": true
+    }
+  ]
+}
