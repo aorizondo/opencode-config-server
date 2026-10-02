@@ -1,0 +1,808 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // ==========================================================================
+  // MODELOS — OpenCode Zen, capa gratuita (provider `opencode`; la credencial
+  // de `opencode-go` en auth.json sirve para los dos). Ningún modelo de pago.
+  //
+  // Comprobado el 2026-09-26 con un turno real con herramientas; la capa
+  // gratuita ROTA, así que revalidar cuando un id deje de responder:
+  //
+  //   modelo                            ctx     tiempo   notas
+  //   space-bunny-free                  1.0 M    18 s    visión · exento del gate
+  //   big-pickle                        200 K    15 s
+  //   ling-3.0-flash-fin-free           262 K    21 s
+  //   muse-spark-1.3-contributor-free   1.0 M    26 s    visión
+  //   mimo-v2.6-flash-free              200 K    27 s    visión
+  //   nemotron-3-ultra-free             1.0 M    30 s
+  //   longcat-2.5-preview-free          1.0 M    57 s    visión
+  //   nemotron-3.5-lightning-free       262 K   114 s    el nombre engaña
+  //
+  // Anunciados por la API pero NO servibles: mimo-v2.5-free,
+  // muse-spark-1.2-contributor-free, jev-1.13-free («Model unavailable»).
+  //
+  // EL GATE DEL FREE TIER: rechaza con «free tier can only be used from within
+  // OpenCode» cuando el agente tiene alguna herramienta QUITADA, por
+  // `permission: <tool>: deny` o por `tools: <tool>: false`. Aislado el
+  // 2026-09-27: una sola regla `shell: deny` basta para el rechazo, mientras que
+  // un system prompt propio de 3 600 caracteres, `temperature` o reglas que solo
+  // son `allow` pasan sin problema. `space-bunny-free` es el único exento.
+  // Por eso los subagentes de agents/*.md, que sí recortan herramientas, van con
+  // modelos gratuitos de OpenRouter, y el advisor de apex con space-bunny-free.
+  // ==========================================================================
+  "model": "opencode/space-bunny-free",
+  "autoupdate": false,
+
+  // Compactación automática al llenarse el contexto. `prune` ya no existe en
+  // 2.0.16: el host lo marca como "unsupported legacy setting" y lo descarta.
+  "compaction": {
+    "auto": true
+  },
+
+  // Un subagente puede lanzar subagentes (el default, 1, se lo impide).
+  // En 2.0.16 la clave vive bajo `experimental`: al nivel raíz el host la
+  // descarta con «omitted unsupported legacy setting».
+  "experimental": {
+    "subagent_depth": 2
+  },
+
+  // ==========================================================================
+  // PERMISOS — nombres de acción = nombres de tool de v2 (`shell`, no `bash`).
+  // Lo rutinario pasa directo; lo destructivo o irreversible queda en "ask", y
+  // ahí entra el advisor de apex (evaluate: "ask-only", decisive: true).
+  // ==========================================================================
+  "permission": {
+    "read": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "edit": "allow",
+    "write": "allow",
+    "webfetch": "allow",
+    "websearch": "allow",
+    "question": "allow",
+    "skill": "allow",
+    "subagent": "allow",
+    "lsp": "allow",
+    "execute": "allow",
+    "external_directory": "ask",
+    // Bancos de memoria por parámetro: consultar es libre; escribir en un banco
+    // ajeno se confirma; borrar bancos o vaciar memoria, nunca. Aquí sí cabe un
+    // `deny`: el gate del free tier solo mira el toolset NATIVO, y un deny sobre
+    // tools de MCP o de plugin no lo dispara (medido con nemotron-3-ultra-free y
+    // hindsight_banks_delete_bank / hindsight_reflect / apex_guard_report).
+    "hindsight_banks_delete_*": "deny",
+    "hindsight_banks_clear_*": "deny",
+    "hindsight_banks_invalidate_*": "deny",
+    "hindsight_banks_update_*": "ask",
+    "hindsight_banks_create_*": "ask",
+    "hindsight_banks_cancel_*": "ask",
+    "hindsight_banks_retain": "ask",
+    "hindsight_banks_sync_retain": "ask",
+    "shell": {
+      "*": "allow",
+      "rm -rf *": "ask",
+      "rm -r *": "ask",
+      "sudo *": "ask",
+      "chmod -R *": "ask",
+      "chown *": "ask",
+      "dd *": "ask",
+      "mkfs*": "ask",
+      "git push --force*": "ask",
+      "git reset --hard*": "ask",
+      "git clean -*": "ask",
+      "curl * | *": "ask",
+      "wget * | *": "ask",
+      "npm publish*": "ask",
+      "docker system prune*": "ask",
+      "kill *": "ask",
+      "pkill *": "ask"
+    }
+  },
+
+  // ==========================================================================
+  // AGENTES PRINCIPALES E INTERNOS. Los subagentes especializados viven en
+  // ~/.config/opencode/agents/*.md y llevan su modelo en el frontmatter.
+  // ==========================================================================
+  "agent": {
+    // `prompt` REEMPLAZA el system prompt que trae opencode. Los dos ficheros
+    // recogen lo que valía de él (concisión, seguir el estilo del repo, no
+    // revertir trabajo ajeno) y añaden lo de esta máquina: español, herramienta
+    // directa antes que shell, y delegación explícita — que el prompt de fábrica
+    // prohíbe salvo que las instrucciones la pidan.
+    "build": {
+      "model": "opencode/space-bunny-free",
+      "temperature": 0.1,
+      "prompt": "{file:$HOME/.config/opencode/prompts/build.md}"
+    },
+    "plan": {
+      "model": "opencode/nemotron-3-ultra-free",
+      "temperature": 0.1,
+      "prompt": "{file:$HOME/.config/opencode/prompts/plan.md}"
+    },
+    // Estos agentes internos NO recortan herramientas, así que cualquier modelo
+    // gratuito de Zen les sirve: van por velocidad medida.
+    "general": {
+      "model": "opencode/mimo-v2.6-flash-free",
+      "temperature": 0.2
+    },
+    // `explore` ya viene de fábrica como subagente de solo lectura (su `* deny`
+    // está en packages/core/src/plugin/agent.ts). Solo se le cambia el prompt,
+    // para que devuelva lo mínimo en vez de un informe.
+    "explore": {
+      "model": "opencode/ling-3.0-flash-fin-free",
+      "temperature": 0.1,
+      "prompt": "{file:$HOME/.config/opencode/prompts/explore.md}"
+    },
+    // El advisor debe quedar encerrado. El plugin ya le pone `* deny`, pero esas
+    // reglas se evalúan ANTES que las globales de este fichero y por tanto el
+    // `shell: allow` de arriba las anulaba: aquí se vuelven a cerrar en la capa
+    // de agente, que es la última que se aplica.
+    "apex-advisor": {
+      "permission": {
+        "*": "deny",
+        "execute": "allow",
+        "apex_advisor_decide": "allow"
+      }
+    },
+
+    "title": { "model": "opencode/big-pickle" },
+    "summary": { "model": "opencode/big-pickle" },
+    "compaction": { "model": "opencode/ling-3.0-flash-fin-free" }
+  },
+
+  // ==========================================================================
+  // PLUGINS. Los de TUI pura viven en cli.json; aquí los de servidor.
+  // ==========================================================================
+  "plugins": [
+    "/opt/hindsight/coding-agents",
+    "opencode2-direnv@latest",
+    "opencode-user-timeline@latest",
+    // Panel /usage: además de los tokens de la sesión, consulta la cuota de la
+    // cuenta de OpenCode (la misma credencial cubre Zen y Go).
+    {
+      "package": "opencode-usage-stat@latest",
+      "options": {
+        "providerUsage": { "opencode-go": true },
+        "providerUsageDisplay": "remaining"
+      }
+    },
+
+    // ======================================================================
+    // apex — configuración INLINE (única fuente; el fichero
+    // opencode-apex.jsonc global quedó retirado a .bak).
+    // Precedencia del plugin: fichero global < inline < fichero local.
+    // ======================================================================
+    {
+      "package": "opencode-apex",
+      "options": {
+        // Toggle de módulos: fuente única, no existe <modulo>.enabled.
+        "modules": {
+          "redact": true,
+          "events": true,
+          "advisor": true,
+          "guard": true,
+          // Abre un puerto y habla con el navegador, pero se quiere activo: es la
+          // vía a Z.ai. Necesita la extensión cargada en Chromium con este mismo
+          // token y una pestaña de chat.z.ai con sesión.
+          "webprovider": false
+        },
+
+        // ------------------------------------------------------------------
+        // redact — cifra secretos antes de que los vea el modelo (AES-256-GCM)
+        // y los restaura en los argumentos de las herramientas.
+        // key vacía ⇒ usa la clave persistida en ~/.config/opencode/apex.key.
+        // ------------------------------------------------------------------
+        "redact": {
+          "mode": "strict",
+          "patterns": [
+            "\\bcustom-secret-[A-Za-z0-9]{16}\\b", 
+            "private-password"
+          ],
+          "bundles": [
+            "aws", "github", "gitlab", "slack", "jwt", "pem", "bearer", 
+            "openai", "anthropic", "google", "stripe", "npm", "database", "azure",
+            "terraform", "vault", "heroku", "vercel", "supabase", "digitalocean",
+            "cloudflare", "observability", "pypi", "rubygems", "twilio", "sendgrid",
+            "postman", "mailgun", "mailchimp", "linear", "shopify", "square",
+            "docker", "kubernetes", "cohere", "huggingface", "discord"
+          ],
+          "minConfidence": "medium",
+          "allowlist": ["^sk-test-"],
+          "prefix": "[SECRET:",
+          "suffix": "]",
+          "key": "",
+          "restore": { "toolInput": true }
+        },
+
+        // ------------------------------------------------------------------
+        // events — ingesta de eventos externos y entrega a la sesión activa.
+        // El listener escucha en loopback; el token es obligatorio de facto,
+        // porque cualquier página web puede llamar a 127.0.0.1 sin CORS.
+        // ------------------------------------------------------------------
+        "events": {
+          "routing": "all",
+          "listener": {
+            "enabled": true,
+            "host": "127.0.0.1",
+            "port": 4599,
+            "token": "{env:APEX_INGEST_TOKEN}"
+          },
+          "subscriptions": []
+        },
+
+        // ------------------------------------------------------------------
+        // webprovider — Z.ai (y DeepSeek) como si fueran un proveedor más.
+        //
+        // `maxConcurrentPerAccount` gobierna cuántos chats web se usan A LA VEZ en
+        // una misma cuenta: con 1 los subagentes se encolan de uno en uno. Cada
+        // petición se serializa por chat, nunca por cuenta, así que subirlo es lo
+        // que permite varios subagentes en paralelo — a cambio de un patrón de
+        // tráfico más visible, que es lo que acota `minDelayMs`.
+        // ------------------------------------------------------------------
+        "webprovider": {
+          "token": "{env:WEBPROVIDER_TOKEN}",
+          "maxConcurrentPerAccount": 3,
+          "minDelayMs": 1500,
+          "requestTimeoutMs": 300000,
+          "platforms": {
+            "zai": { "enabled": true, "tabs": 1 },
+            "deepseek": { "enabled": true, "tabs": 1 }
+          }
+        },
+
+        // ------------------------------------------------------------------
+        // guard — meta-permisos: el "deny" que la config no puede declarar.
+        //
+        // La capa gratuita de Zen rechaza al agente al que le falte una
+        // herramienta, y el host corta el camino antes de los plugins cuando la
+        // config dice `deny` (packages/core/src/permission.ts: `if (denied(...))
+        // return` va ANTES de `hooks.trigger`). Así que en `permission` y en los
+        // agents/*.md no hay un solo `deny`: todo es `allow` o `ask`, el toolset
+        // queda completo, y la prohibición se decide aquí.
+        //
+        // Reglas por agente, lista ordenada y **la última coincidencia gana** —
+        // el mismo criterio del ruleset del host. Ese orden es lo que permite
+        // «nada, salvo esta ruta»: primero el `deny` amplio, luego el `allow`
+        // estrecho. Las de `"*"` se evalúan antes que las del agente.
+        //
+        // `mode`: "report" anota sin aplicar (para rodar las reglas y leerlas con
+        // la tool apex_guard_report); "enforce" las aplica.
+        // ------------------------------------------------------------------
+        "guard": {
+          "mode": "enforce",
+          "fallback": "keep",
+          "keep": 500,
+          "agents": {
+            "apex-advisor": [
+              {
+                "action": "*",
+                "effect": "deny",
+                "reason": "el advisor decide permisos; no toca nada más"
+              },
+              {
+                "action": "execute",
+                "effect": "allow"
+              },
+              {
+                "action": "apex_advisor_decide",
+                "effect": "allow"
+              }
+            ],
+            "code-reviewer": [
+              {
+                "action": "write",
+                "effect": "deny",
+                "reason": "code-reviewer no modifica el proyecto"
+              },
+              {
+                "action": "edit",
+                "effect": "deny",
+                "reason": "code-reviewer no modifica el proyecto"
+              },
+              {
+                "action": "patch",
+                "effect": "deny",
+                "reason": "code-reviewer no modifica el proyecto"
+              },
+              {
+                "action": "subagent",
+                "effect": "deny",
+                "reason": "code-reviewer no delega: responde"
+              },
+              {
+                "action": "question",
+                "effect": "deny",
+                "reason": "code-reviewer no pregunta: responde"
+              },
+              {
+                "action": "webfetch",
+                "effect": "deny",
+                "reason": "code-reviewer no sale a la red"
+              },
+              {
+                "action": "websearch",
+                "effect": "deny",
+                "reason": "code-reviewer no sale a la red"
+              },
+              {
+                "action": "shell",
+                "effect": "deny",
+                "reason": "code-reviewer no ejecuta comandos"
+              },
+              {
+                "action": "write",
+                "resource": ".opencode/code-reviewer/**",
+                "effect": "allow"
+              },
+              {
+                "action": "edit",
+                "resource": ".opencode/code-reviewer/**",
+                "effect": "allow"
+              },
+              {
+                "action": "patch",
+                "resource": ".opencode/code-reviewer/**",
+                "effect": "allow"
+              }
+            ],
+            "security-auditor": [
+              {
+                "action": "write",
+                "effect": "deny",
+                "reason": "security-auditor no modifica el proyecto"
+              },
+              {
+                "action": "edit",
+                "effect": "deny",
+                "reason": "security-auditor no modifica el proyecto"
+              },
+              {
+                "action": "patch",
+                "effect": "deny",
+                "reason": "security-auditor no modifica el proyecto"
+              },
+              {
+                "action": "subagent",
+                "effect": "deny",
+                "reason": "security-auditor no delega: responde"
+              },
+              {
+                "action": "question",
+                "effect": "deny",
+                "reason": "security-auditor no pregunta: responde"
+              },
+              {
+                "action": "webfetch",
+                "effect": "deny",
+                "reason": "security-auditor no sale a la red"
+              },
+              {
+                "action": "websearch",
+                "effect": "deny",
+                "reason": "security-auditor no sale a la red"
+              },
+              {
+                "action": "shell",
+                "effect": "deny",
+                "reason": "security-auditor no ejecuta comandos"
+              },
+              {
+                "action": "write",
+                "resource": ".opencode/security-auditor/**",
+                "effect": "allow"
+              },
+              {
+                "action": "edit",
+                "resource": ".opencode/security-auditor/**",
+                "effect": "allow"
+              },
+              {
+                "action": "patch",
+                "resource": ".opencode/security-auditor/**",
+                "effect": "allow"
+              }
+            ],
+            "debugger": [
+              {
+                "action": "write",
+                "effect": "deny",
+                "reason": "debugger no modifica el proyecto"
+              },
+              {
+                "action": "edit",
+                "effect": "deny",
+                "reason": "debugger no modifica el proyecto"
+              },
+              {
+                "action": "patch",
+                "effect": "deny",
+                "reason": "debugger no modifica el proyecto"
+              },
+              {
+                "action": "subagent",
+                "effect": "deny",
+                "reason": "debugger no delega: responde"
+              },
+              {
+                "action": "question",
+                "effect": "deny",
+                "reason": "debugger no pregunta: responde"
+              },
+              {
+                "action": "webfetch",
+                "effect": "deny",
+                "reason": "debugger no sale a la red"
+              },
+              {
+                "action": "websearch",
+                "effect": "deny",
+                "reason": "debugger no sale a la red"
+              },
+              {
+                "action": "write",
+                "resource": ".opencode/debugger/**",
+                "effect": "allow"
+              },
+              {
+                "action": "edit",
+                "resource": ".opencode/debugger/**",
+                "effect": "allow"
+              },
+              {
+                "action": "patch",
+                "resource": ".opencode/debugger/**",
+                "effect": "allow"
+              }
+            ],
+            "documenter": [
+              {
+                "action": "write",
+                "effect": "deny",
+                "reason": "documenter no modifica el proyecto"
+              },
+              {
+                "action": "edit",
+                "effect": "deny",
+                "reason": "documenter no modifica el proyecto"
+              },
+              {
+                "action": "patch",
+                "effect": "deny",
+                "reason": "documenter no modifica el proyecto"
+              },
+              {
+                "action": "subagent",
+                "effect": "deny",
+                "reason": "documenter no delega: responde"
+              },
+              {
+                "action": "question",
+                "effect": "deny",
+                "reason": "documenter no pregunta: responde"
+              },
+              {
+                "action": "webfetch",
+                "effect": "deny",
+                "reason": "documenter no sale a la red"
+              },
+              {
+                "action": "websearch",
+                "effect": "deny",
+                "reason": "documenter no sale a la red"
+              },
+              {
+                "action": "shell",
+                "effect": "deny",
+                "reason": "documenter no ejecuta comandos"
+              },
+              {
+                "action": "write",
+                "resource": ".opencode/documenter/**",
+                "effect": "allow"
+              },
+              {
+                "action": "edit",
+                "resource": ".opencode/documenter/**",
+                "effect": "allow"
+              },
+              {
+                "action": "patch",
+                "resource": ".opencode/documenter/**",
+                "effect": "allow"
+              },
+              {
+                "action": "edit",
+                "resource": "**/*.md",
+                "effect": "allow"
+              },
+              {
+                "action": "write",
+                "resource": "**/*.md",
+                "effect": "allow"
+              },
+              {
+                "action": "edit",
+                "resource": "**/*.mdx",
+                "effect": "allow"
+              },
+              {
+                "action": "write",
+                "resource": "**/*.mdx",
+                "effect": "allow"
+              }
+            ],
+            "git-ops": [
+              {
+                "action": "write",
+                "effect": "deny",
+                "reason": "git-ops no modifica el proyecto"
+              },
+              {
+                "action": "edit",
+                "effect": "deny",
+                "reason": "git-ops no modifica el proyecto"
+              },
+              {
+                "action": "patch",
+                "effect": "deny",
+                "reason": "git-ops no modifica el proyecto"
+              },
+              {
+                "action": "subagent",
+                "effect": "deny",
+                "reason": "git-ops no delega: responde"
+              },
+              {
+                "action": "question",
+                "effect": "deny",
+                "reason": "git-ops no pregunta: responde"
+              },
+              {
+                "action": "webfetch",
+                "effect": "deny",
+                "reason": "git-ops no sale a la red"
+              },
+              {
+                "action": "websearch",
+                "effect": "deny",
+                "reason": "git-ops no sale a la red"
+              },
+              {
+                "action": "shell",
+                "effect": "deny",
+                "reason": "git-ops solo ejecuta ['git *', 'gh *']"
+              },
+              {
+                "action": "shell",
+                "resource": "git *",
+                "effect": "allow"
+              },
+              {
+                "action": "shell",
+                "resource": "gh *",
+                "effect": "allow"
+              },
+              {
+                "action": "write",
+                "resource": ".opencode/git-ops/**",
+                "effect": "allow"
+              },
+              {
+                "action": "edit",
+                "resource": ".opencode/git-ops/**",
+                "effect": "allow"
+              },
+              {
+                "action": "patch",
+                "resource": ".opencode/git-ops/**",
+                "effect": "allow"
+              },
+              {
+                "action": "shell",
+                "resource": "git push --force*",
+                "effect": "ask"
+              },
+              {
+                "action": "shell",
+                "resource": "git reset --hard*",
+                "effect": "ask"
+              },
+              {
+                "action": "shell",
+                "resource": "git clean -*",
+                "effect": "ask"
+              }
+            ],
+            "refactorer": [
+              {
+                "action": "write",
+                "effect": "deny",
+                "reason": "refactorer no modifica el proyecto"
+              },
+              {
+                "action": "edit",
+                "effect": "deny",
+                "reason": "refactorer no modifica el proyecto"
+              },
+              {
+                "action": "patch",
+                "effect": "deny",
+                "reason": "refactorer no modifica el proyecto"
+              },
+              {
+                "action": "subagent",
+                "effect": "deny",
+                "reason": "refactorer no delega: responde"
+              },
+              {
+                "action": "question",
+                "effect": "deny",
+                "reason": "refactorer no pregunta: responde"
+              },
+              {
+                "action": "webfetch",
+                "effect": "deny",
+                "reason": "refactorer no sale a la red"
+              },
+              {
+                "action": "websearch",
+                "effect": "deny",
+                "reason": "refactorer no sale a la red"
+              },
+              {
+                "action": "write",
+                "resource": ".opencode/refactorer/**",
+                "effect": "allow"
+              },
+              {
+                "action": "edit",
+                "resource": ".opencode/refactorer/**",
+                "effect": "allow"
+              },
+              {
+                "action": "patch",
+                "resource": ".opencode/refactorer/**",
+                "effect": "allow"
+              },
+              {
+                "action": "edit",
+                "effect": "ask"
+              },
+              {
+                "action": "write",
+                "effect": "ask"
+              },
+              {
+                "action": "patch",
+                "effect": "ask"
+              }
+            ],
+            "lib-researcher": [
+              {
+                "action": "write",
+                "effect": "deny",
+                "reason": "lib-researcher no modifica el proyecto"
+              },
+              {
+                "action": "edit",
+                "effect": "deny",
+                "reason": "lib-researcher no modifica el proyecto"
+              },
+              {
+                "action": "patch",
+                "effect": "deny",
+                "reason": "lib-researcher no modifica el proyecto"
+              },
+              {
+                "action": "subagent",
+                "effect": "deny",
+                "reason": "lib-researcher no delega: responde"
+              },
+              {
+                "action": "question",
+                "effect": "deny",
+                "reason": "lib-researcher no pregunta: responde"
+              },
+              {
+                "action": "shell",
+                "effect": "deny",
+                "reason": "lib-researcher no ejecuta comandos"
+              },
+              {
+                "action": "write",
+                "resource": ".opencode/lib-researcher/**",
+                "effect": "allow"
+              },
+              {
+                "action": "edit",
+                "resource": ".opencode/lib-researcher/**",
+                "effect": "allow"
+              },
+              {
+                "action": "patch",
+                "resource": ".opencode/lib-researcher/**",
+                "effect": "allow"
+              }
+            ]
+          }
+        },
+
+        // ------------------------------------------------------------------
+        // advisor — segunda opinión sobre los permisos que quedan en "ask".
+        //
+        // Funciona como el modo auto de Claude Code: aprueba por defecto lo
+        // reversible y acotado, y solo frena lo irreversible o de alcance amplio.
+        // Requiere la tool `execute` en el agente advisor (opencode v2 invoca las
+        // herramientas desde el sandbox JS, no como function calls) — está
+        // concedida en core/advisor-agent.ts.
+        //
+        // Su agente es `* deny` + dos tools, o sea toolset recortado, así que el
+        // gate del free tier lo rechaza con cualquier modelo de Zen salvo
+        // `space-bunny-free`. Eso, y no la lentitud, era la causa de sus timeouts.
+        // Alternativa si se quiere más rápido: un gratuito de OpenRouter.
+        // ------------------------------------------------------------------
+        "advisor": {
+          "model": "opencode/space-bunny-free",
+          "decisive": true,
+          "evaluate": "ask-only",
+          "timeoutMs": 45000,
+          "actions": ["shell", "execute", "write", "edit", "external_directory"],
+          "system": "Eres el control de admisión de un harness de programación. Por cada herramienta que quede pendiente de permiso decides allow o deny. Decides SIEMPRE llamando a la herramienta apex_advisor_decide con requestID, decision y reason; nunca respondes solo con texto.\n\nCriterio general: apruebas. El agente ya está trabajando en lo que el usuario le pidió, y el usuario quiere avanzar sin ir aprobando cada paso. Un cambio acotado y reversible se aprueba aunque no sea perfecto. La duda no es motivo para denegar; el daño concreto sí.\n\nAPRUEBA sin más: leer, listar y buscar; escribir o editar ficheros del proyecto, incluidos ficheros nuevos; instalar dependencias del proyecto; ejecutar tests, linters, compiladores y formateadores; git add, commit, branch, checkout, stash, diff y log; borrar ficheros concretos que el propio agente creó; ejecutar scripts del proyecto; leer variables de entorno no sensibles.\n\nDENIEGA solo cuando la acción encaja en una de estas líneas:\n1. Destrucción de alcance amplio o irreversible: rm -rf sobre un directorio que no sea temporal, borrar de raíz, truncar o sobrescribir un fichero sin haberlo leído antes, dd, mkfs, drop database, borrar ramas remotas.\n2. Reescritura de historia o publicación no pedida: git push --force, git reset --hard con cambios sin guardar, git clean -fdx, npm publish, deploy, releases, tags empujados.\n3. Exfiltración: enviar a la red el contenido de .env, claves, tokens, credenciales o datos del usuario; subir ficheros a un servicio externo; canalizar un descarga directamente a un intérprete (curl … | sh).\n4. Fuera del alcance: escribir fuera del proyecto sin que el usuario lo haya pedido, tocar la configuración del sistema, sudo, cambiar permisos de forma recursiva, matar procesos ajenos.\n5. El agente se sale de su papel: un subagente declarado de solo lectura que intenta editar, o uno especializado que hace algo ajeno a su función.\n\nCuando deniegas, el motivo va en una frase: qué te ha frenado y cuál es el camino aceptable (por ejemplo: leer el fichero y editarlo en vez de sobrescribirlo, acotar la ruta, o preguntar al usuario). Sé breve: tu respuesta bloquea el turno mientras la escribes.",
+          "promptTemplate": "Solicitud {{requestID}}\nHerramienta: {{action}}\nSobre: {{resources}}\nSesión: {{sessionID}} · agente {{agent}}\n{{enforcement}}\nLlama a apex_advisor_decide ahora."
+        }
+      }
+    },
+    { "package": "opencode-claude-code-acpbridge", 
+    "options": { "command": "claude-agent-acp" } }
+  ],
+
+  // ==========================================================================
+  // MCP
+  // ==========================================================================
+  "mcp": {
+    // Memoria de hindsight con el banco COMO PARÁMETRO: «busca en el banco X».
+    //
+    // Es el endpoint MULTI-BANCO del servidor de hindsight (`/mcp/`, distinto de
+    // `/mcp/{bank}/`, que fija el banco en la URL). Añade `bank_id` a las 38
+    // herramientas y suma `list_banks`, así que el agente descubre los bancos y
+    // elige. El MCP stdio de `coding-agents` NO sirve para esto: resuelve un solo
+    // banco del directorio de trabajo y ninguna de sus tools lo acepta.
+    //
+    // Complementa al plugin, no lo sustituye: el plugin sigue inyectando y
+    // reteniendo la memoria del proyecto en su propio banco, automáticamente.
+    "hindsight_banks": {
+      "type": "remote",
+      "url": "https://hindsight.example.com/mcp/",
+      "enabled": true,
+      //"headers": {
+      //  "Authorization": "Bearer {env:HINDSIGHT_MCP_BEARER}"
+      //},
+      "timeout": 300000
+    },
+
+    "infisical": {
+      "type": "local",
+      "command": ["npx", "-y", "@infisical/mcp"],
+      "enabled": true,
+      "environment": {
+        "INFISICAL_HOST_URL": "{env:INFISICAL_HOST_URL}",
+        "INFISICAL_AUTH_METHOD": "{env:INFISICAL_AUTH_METHOD}",
+        "INFISICAL_UNIVERSAL_AUTH_CLIENT_ID": "{env:INFISICAL_UNIVERSAL_AUTH_CLIENT_ID}",
+        "INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET": "{env:INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET}"
+      },
+      "codemode": true,
+      "timeout": 300000
+    },
+    "servers": {
+      "websearch": {
+        "type": "remote",
+        "url": "https://mcp.exa.ai/mcp"
+      }
+    }
+  }
+
+  // Nota: NO añadir aquí "skills.paths" con ~/.claude/skills — esas skills no
+  // llevan el campo que espera el transform de hindsight y lo desactivan
+  // entero (SchemaError: Missing key at ["path"]).
+}
