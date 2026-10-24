@@ -43,8 +43,36 @@ processes.spawn(ChildProcess.make(method.command[0], method.command.slice(1), {
 - **stderr is streamed to the user** as the attempt's message, and is what they
   see when it fails.
 - **Non-zero exit fails the login**, with the collected stderr as the message.
-- **stdin is `/dev/null`**: the command cannot prompt. Credentials have to come
-  from the environment or from a file — see `login_script.sh`.
+- **stdin is `/dev/null`**: the command cannot prompt.
+- **The environment is the OpenCode server's**, not the employee's shell
+  (`extendEnv: true` on the server process). With the background service,
+  variables exported before `opencode auth login` never reach the command;
+  `--standalone` starts a private server from the calling shell
+  (`packages/cli/src/services/standalone.ts`, also `extendEnv: true`), so there
+  they do.
+- **Both the CLI and the TUI show stderr live**, one completed line at a time
+  (`packages/cli/src/commands/handlers/auth/login.ts`,
+  `packages/tui/src/component/dialog-integration.tsx`). That is what makes a
+  browser login possible: the command prints an address and a code, then waits.
+- **The attempt is abandoned after 10 minutes**, so a login code has to expire
+  well before that (`OCS_DEVICE_TTL`, at most 540 s).
+
+Our command therefore signs in through the browser, shaped after RFC 8628:
+
+```
+script                         server                          browser
+POST /auth/device        ->    device_code + user_code
+prints /login?code=…                                     ->    GET /login?code=…
+                                                         <-    POST /login/approve
+POST /auth/device/token  ->    400 authorization_pending        (password, API key
+  … every `interval` s   ->    200 {"token": …}, exactly once    or Bifrost key)
+```
+
+The device code is the script's secret and never leaves it; the user code is
+what the employee compares in the browser. Polling errors follow RFC 8628 §3.5
+(`authorization_pending`, `slow_down`, `expired_token`, `access_denied`). A
+credential in the environment or in `~/.config/opencode-corp/credentials`
+skips the browser and goes straight to `POST /auth/token` — that is the CI path.
 
 The command runs **only on an explicit login**, never on a refresh. Anything
 that must stay current cannot live here.

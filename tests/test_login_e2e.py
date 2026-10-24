@@ -10,12 +10,15 @@ imposes on `auth.command` (packages/core/src/integration.ts:620-650):
 
 from __future__ import annotations
 
+import contextlib
 import os
+import re
 import shutil
 import socket
 import subprocess
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -39,11 +42,9 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-@pytest.fixture
-def live_server(settings, config_dir):
+@contextlib.contextmanager
+def serve(settings):
     """Serve the app on a loopback port, like a real deployment."""
-    from dataclasses import replace
-
     port = free_port()
     base_url = f"http://127.0.0.1:{port}"
     app = create_app(replace(settings, base_url=base_url))
@@ -62,16 +63,22 @@ def live_server(settings, config_dir):
         server.should_exit = True
         pytest.fail("the test server never became healthy")
 
-    yield base_url
+    try:
+        yield base_url
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
 
-    server.should_exit = True
-    thread.join(timeout=10)
+
+@pytest.fixture
+def live_server(settings, config_dir):
+    with serve(settings) as base_url:
+        yield base_url
 
 
-def run_login(base_url: str, env: dict[str, str], *, home: Path) -> subprocess.CompletedProcess[str]:
-    """Run the manifest's auth.command exactly as the harness would."""
+def login_command(base_url: str, env: dict[str, str], *, home: Path) -> tuple[list[str], dict[str, str]]:
+    """The manifest's auth.command and the environment the harness gives it."""
     document = httpx.get(f"{base_url}/.well-known/opencode", timeout=5).json()
-    command = document["auth"]["command"]
     environment = {
         "PATH": os.environ["PATH"],
         "HOME": str(home),
@@ -79,6 +86,12 @@ def run_login(base_url: str, env: dict[str, str], *, home: Path) -> subprocess.C
         "OPENCODE_CORP_SKIP_BOOTSTRAP": "1",
         **env,
     }
+    return document["auth"]["command"], environment
+
+
+def run_login(base_url: str, env: dict[str, str], *, home: Path) -> subprocess.CompletedProcess[str]:
+    """Run the manifest's auth.command exactly as the harness would."""
+    command, environment = login_command(base_url, env, home=home)
     return subprocess.run(
         command,
         capture_output=True,
@@ -166,13 +179,6 @@ class TestCredentialsFile:
 
 
 class TestFailures:
-    def test_explains_how_to_provide_credentials(self, live_server, tmp_path):
-        result = run_login(live_server, {}, home=tmp_path)
-        assert result.returncode == 4
-        assert result.stdout == "", "a failed login must not store anything"
-        assert "OPENCODE_CORP_TOKEN" in result.stderr
-        assert "OPENCODE_CORP_USER" in result.stderr
-
     def test_relays_the_server_rejection(self, live_server, tmp_path):
         result = run_login(
             live_server,
@@ -210,6 +216,94 @@ class TestFailures:
         )
         assert result.returncode == 2
         assert "no server URL" in result.stderr
+
+
+class BrowserLogin:
+    """The login command left waiting for someone to approve it in a browser."""
+
+    def __init__(self, base_url: str, env: dict[str, str], *, home: Path) -> None:
+        command, environment = login_command(base_url, env, home=home)
+        self.process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+        )
+        self.printed: list[str] = []
+        self.url = self.code = ""
+        for line in self.process.stderr:
+            self.printed.append(line)
+            if found := re.search(r"(https?://\S+/login\?code=\S+)", line):
+                self.url = found.group(1)
+            if found := re.search(r"code: (\S+)", line):
+                self.code = found.group(1)
+                break
+
+    def finish(self, timeout: float = 30) -> tuple[int, str, str]:
+        stdout, stderr = self.process.communicate(timeout=timeout)
+        return self.process.returncode, stdout, "".join(self.printed) + stderr
+
+
+class TestBrowserLogin:
+    """No credentials in the environment or on disk: sign in from a browser."""
+
+    def test_browser_approval_yields_a_usable_credential(self, live_server, tmp_path):
+        login = BrowserLogin(live_server, {"OPENCODE_CORP_NO_BROWSER": "1"}, home=tmp_path)
+        assert login.code, "".join(login.printed)
+        assert login.url.startswith(f"{live_server}/login?code=")
+
+        approved = httpx.post(
+            f"{live_server}/login/approve",
+            json={"user_code": login.code, "username": "ana.ruiz", "password": PASSWORD},
+            timeout=5,
+        )
+        assert approved.status_code == 200, approved.text
+
+        returncode, token, printed = login.finish()
+        assert returncode == 0, printed
+        config = httpx.get(
+            f"{live_server}/config/opencode.json", headers={"Authorization": f"Bearer {token}"}, timeout=5
+        )
+        assert config.status_code == 200
+
+    def test_the_browser_does_not_keep_the_login_waiting(self, live_server, tmp_path):
+        """The harness waits for the command's output to close; a browser left
+        holding it would make the login hang until the browser exits."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        opened = tmp_path / "opened"
+        fake = bin_dir / "xdg-open"
+        fake.write_text(f'#!/bin/sh\necho $$ > {opened}.pid\nprintf %s "$1" > {opened}\nexec sleep 30\n')
+        fake.chmod(0o755)
+
+        login = BrowserLogin(
+            live_server,
+            {"PATH": f"{bin_dir}:{os.environ['PATH']}", "DISPLAY": ":0"},
+            home=tmp_path,
+        )
+        httpx.post(
+            f"{live_server}/login/approve",
+            json={"user_code": login.code, "api_key": API_KEY},
+            timeout=5,
+        ).raise_for_status()
+
+        try:
+            returncode, _, printed = login.finish(timeout=15)
+        finally:
+            with contextlib.suppress(OSError, ValueError):
+                os.kill(int((tmp_path / "opened.pid").read_text()), 15)
+        assert returncode == 0, printed
+        assert opened.read_text() == login.url
+
+    def test_an_unapproved_code_runs_out(self, settings, config_dir, tmp_path):
+        with serve(replace(settings, device_ttl_seconds=3)) as base_url:
+            login = BrowserLogin(base_url, {"OPENCODE_CORP_NO_BROWSER": "1"}, home=tmp_path)
+            returncode, stdout, printed = login.finish()
+        assert returncode == 8
+        assert stdout == "", "a failed login must not store anything"
+        assert "expired" in printed
 
 
 class TestBootstrap:

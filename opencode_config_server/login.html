@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Sign in to OpenCode</title>
+<style nonce="__NONCE__">
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1b1f24; --muted: #59636e;
+    --line: #d5dae0; --accent: #2f6feb; --accent-text: #ffffff;
+    --ok-bg: #e6f4ea; --ok-text: #1e5e2f; --err-bg: #fde8e8; --err-text: #8a1c1c;
+    --code-bg: #eef1f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1215; --card: #171b20; --text: #e6e9ec; --muted: #9aa4ae;
+      --line: #2c333b; --accent: #4f8cff; --accent-text: #0b0d10;
+      --ok-bg: #12321d; --ok-text: #9fe0b0; --err-bg: #3a1414; --err-text: #f3a6a6;
+      --code-bg: #20262d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px;
+    background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { width: 100%; max-width: 420px; background: var(--card); border: 1px solid var(--line);
+         border-radius: 12px; padding: 28px; }
+  h1 { font-size: 1.35rem; margin: 0 0 4px; }
+  .host { color: var(--muted); margin: 0 0 20px; font-size: .95rem; word-break: break-all; }
+  p.note { color: var(--muted); font-size: .92rem; margin: 0 0 20px; }
+  label { display: block; font-weight: 600; font-size: .9rem; margin: 14px 0 6px; }
+  input {
+    width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--card); color: var(--text); font: inherit;
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em;
+          text-transform: uppercase; background: var(--code-bg); }
+  .tabs { display: flex; gap: 6px; margin-top: 20px; border-bottom: 1px solid var(--line); }
+  .tabs button {
+    flex: 1; padding: 8px; border: 0; background: none; color: var(--muted); font: inherit;
+    border-bottom: 2px solid transparent; cursor: pointer;
+  }
+  .tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+  .panel[hidden] { display: none; }
+  .submit {
+    width: 100%; margin-top: 22px; padding: 11px; border: 0; border-radius: 8px;
+    background: var(--accent); color: var(--accent-text); font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .submit:disabled { opacity: .6; cursor: progress; }
+  .message { margin-top: 16px; padding: 12px; border-radius: 8px; font-size: .95rem; }
+  .message[hidden] { display: none; }
+  .ok { background: var(--ok-bg); color: var(--ok-text); }
+  .err { background: var(--err-bg); color: var(--err-text); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Sign in to OpenCode</h1>
+  <p class="host">__HOST__</p>
+  <p class="note">
+    This connects OpenCode on your computer to the company configuration.
+    Only continue if you just ran <code>opencode auth login</code> and the code below
+    matches the one shown there.
+  </p>
+
+  <form id="form" novalidate>
+    <label for="code">Code from OpenCode</label>
+    <input id="code" name="code" autocomplete="off" spellcheck="false" maxlength="12"
+           placeholder="ABCD-EFGH" value="__CODE__" required>
+
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" id="tab-key" aria-controls="panel-key" aria-selected="true">API key</button>
+      <button type="button" role="tab" id="tab-password" aria-controls="panel-password" aria-selected="false">Username &amp; password</button>
+    </div>
+
+    <div class="panel" id="panel-key" role="tabpanel" aria-labelledby="tab-key">
+      <label for="api_key">API key</label>
+      <input id="api_key" name="api_key" type="password" autocomplete="off" spellcheck="false"
+             aria-describedby="api_key_hint">
+      <p class="note" id="api_key_hint">Your corporate API key, or your Bifrost virtual key (<code>sk-bf-…</code>).</p>
+    </div>
+
+    <div class="panel" id="panel-password" role="tabpanel" aria-labelledby="tab-password" hidden>
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" spellcheck="false">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password">
+    </div>
+
+    <button class="submit" id="submit" type="submit">Sign in</button>
+    <div class="message" id="message" role="status" aria-live="polite" hidden></div>
+  </form>
+</main>
+<script nonce="__NONCE__">
+  (() => {
+    const form = document.getElementById("form");
+    const submit = document.getElementById("submit");
+    const message = document.getElementById("message");
+    let mode = "key";
+
+    const select = (next) => {
+      mode = next;
+      for (const [name, tab, panel] of [["key", "tab-key", "panel-key"], ["password", "tab-password", "panel-password"]]) {
+        document.getElementById(tab).setAttribute("aria-selected", String(name === next));
+        document.getElementById(panel).hidden = name !== next;
+      }
+      document.getElementById(next === "key" ? "api_key" : "username").focus();
+    };
+    document.getElementById("tab-key").addEventListener("click", () => select("key"));
+    document.getElementById("tab-password").addEventListener("click", () => select("password"));
+
+    const show = (kind, text) => {
+      message.className = "message " + kind;
+      message.textContent = text;
+      message.hidden = false;
+    };
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const body = { user_code: document.getElementById("code").value.trim() };
+      if (mode === "key") body.api_key = document.getElementById("api_key").value.trim();
+      else {
+        body.username = document.getElementById("username").value.trim();
+        body.password = document.getElementById("password").value;
+      }
+      submit.disabled = true;
+      message.hidden = true;
+      try {
+        const response = await fetch("login/approve", {
+          method: "POST",
+          headers: { "content-type": "application/json", accept: "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.ok) {
+          show("ok", `Signed in as ${data.subject}. Go back to OpenCode: it continues on its own. You can close this tab.`);
+          form.querySelectorAll("input, button").forEach((element) => { element.disabled = true; });
+          return;
+        }
+        show("err", data.detail || `Sign-in failed (HTTP ${response.status}).`);
+      } catch {
+        show("err", "Cannot reach the server. Check your network or VPN and try again.");
+      }
+      submit.disabled = false;
+    });
+
+    document.getElementById(document.getElementById("code").value ? "api_key" : "code").focus();
+  })();
+</script>
+</body>
+</html>

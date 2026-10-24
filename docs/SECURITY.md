@@ -9,7 +9,8 @@ the whole company.
 
 ## What is public
 
-Only `/.well-known/opencode` and `/health`.
+`/.well-known/opencode`, `/health`, the sign-in page `/login`, and the start of
+a browser login, `POST /auth/device`.
 
 The manifest has to be public — the harness fetches it with no credentials
 (`wellknown.ts:60`), because it is what explains how to authenticate. It
@@ -19,6 +20,27 @@ published: it is, to anyone who can reach the server.
 `/health` reports counts and problem descriptions, never names, hashes or
 tokens.
 
+`POST /auth/device` hands out a pair of codes that are worth nothing until
+someone approves the user code with valid credentials. The number of pending
+logins is capped (1000) and each expires after `OCS_DEVICE_TTL`.
+
+### The browser login
+
+- The **device code** (256 bits) only ever travels between the login command and
+  the server; it is what redeems the token, exactly once. The **user code**
+  (8 characters from a 27-letter alphabet, ~38 bits) is only good for approving,
+  and approving is rate limited like `/auth/token`: a wrong code counts as a
+  failed attempt.
+- `/login` is a single self-contained page: no external resources, a per-request
+  CSP nonce (`default-src 'none'`, `connect-src 'self'`, `frame-ancestors
+  'none'`), `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and the
+  `code` parameter is escaped. Credentials go in a JSON body to
+  `/login/approve`, never in a URL.
+- The page tells the employee to continue only if they just ran
+  `opencode auth login` and the codes match. That is the defence against the
+  classic device-flow phish — an attacker starting a login and sending someone
+  else the link — and it is a human check, as in every RFC 8628 deployment.
+
 ## Credentials
 
 | Artefact | At rest | In transit |
@@ -26,6 +48,7 @@ tokens.
 | Password | PBKDF2-HMAC-SHA256, 600 000 iterations, 16-byte salt | HTTP Basic over TLS |
 | API key | SHA-256 digest | `X-Api-Key` over TLS |
 | Session token | not stored — stateless HMAC-SHA256 | `Authorization: Bearer`, and a URL path segment for skills |
+| Bifrost virtual key | not stored here — checked against Bifrost on each sign-in | JSON body to `/login/approve`, or `X-Api-Key`; forwarded to Bifrost as `x-bf-vk` |
 
 Password and API key comparisons use `hmac.compare_digest`. An unknown username
 is verified against a dummy hash so it costs the same as a wrong password, and
@@ -59,6 +82,26 @@ by default. Revocation is therefore server side and checked on **every** request
 
 Bump `version` to kill one user's tokens; rotate `OCS_SESSION_SECRET` to kill
 everyone's.
+
+### Bifrost virtual keys
+
+With `OCS_BIFROST_URL` set, a key starting with `sk-bf-` is checked with
+Bifrost's self-service `GET /api/governance/virtual-keys/quota` (no admin
+credential involved; the key is the credential). It is accepted only on `200`
+**and** `"is_active": true` — Bifrost also answers `200` for a key that has been
+switched off. `401` (unknown) and `403` (expired) are rejections; anything else,
+or Bifrost being unreachable, is a `503`, not a bad credential.
+
+The session belongs to `vk:<virtual key name>`. Those names cannot be created in
+`users.json`, so a Bifrost key can never pose as a local account.
+
+There is no `users.json` entry to revoke, which is the trade-off: **disabling a
+virtual key in Bifrost stops new sign-ins, not sessions already issued.** Those
+live until `OCS_VK_TOKEN_TTL_DAYS` (7 by default), which is why they are short.
+Unsetting `OCS_BIFROST_URL` invalidates all of them at once; rotating
+`OCS_SESSION_SECRET` does too, along with everyone else's. The key itself keeps
+being enforced by Bifrost for inference, so what lingers is read access to the
+corporate configuration.
 
 ## The server is trusted by every client
 

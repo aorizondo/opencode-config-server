@@ -6,6 +6,14 @@
 #   * stdout (trimmed) becomes the stored credential  -> only the token goes there
 #   * stderr is what the employee sees in the TUI     -> all progress goes there
 #   * exit != 0 fails the login and shows stderr as the error
+#   * the command runs with the OpenCode *server's* environment and is killed
+#     after 10 minutes
+#
+# Credentials, first match wins:
+#   1. OPENCODE_CORP_TOKEN, or OPENCODE_CORP_USER + OPENCODE_CORP_PASSWORD
+#   2. the credentials file ($OPENCODE_CORP_CREDENTIALS, ~/.config/opencode-corp/credentials)
+#   3. browser login: the employee signs in at <server>/login with the code we print
+#      (OPENCODE_CORP_NO_BROWSER=1 prints the address without trying to open it)
 set -euo pipefail
 
 # Stdout is the credential channel, so nothing else may write to it: fd 3 keeps
@@ -59,6 +67,93 @@ fi
 response_file="$(mktemp)"
 trap 'rm -f "$response_file"' EXIT
 
+# Flat JSON from our own server: no jq dependency on employee machines.
+json_string() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" "$response_file" | head -n 1; }
+json_number() { sed -n "s/.*\"$1\":\([0-9][0-9]*\).*/\1/p" "$response_file" | head -n 1; }
+
+open_browser() {
+  [ "${OPENCODE_CORP_NO_BROWSER:-0}" = "1" ] && return 1
+  # `3>&-`: the browser must not inherit the token channel, or the harness would
+  # keep reading our stdout until the browser exits.
+  case "$(uname -s)" in
+    Darwin)
+      command -v open >/dev/null 2>&1 && { open "$1" >/dev/null 2>&1 3>&- & return 0; } ;;
+    Linux)
+      if grep -qi microsoft /proc/version 2>/dev/null && command -v cmd.exe >/dev/null 2>&1; then
+        cmd.exe /c start "" "$1" >/dev/null 2>&1 3>&- &
+        return 0
+      fi
+      if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open >/dev/null 2>&1; then
+        xdg-open "$1" >/dev/null 2>&1 3>&- &
+        return 0
+      fi ;;
+    MINGW* | MSYS* | CYGWIN*)
+      start "" "$1" >/dev/null 2>&1 3>&- &
+      return 0 ;;
+  esac
+  return 1
+}
+
+# Browser login (RFC 8628 shape). Leaves the token response in $response_file
+# and status=200, like the direct exchanges above.
+browser_login() {
+  status=$(curl -sS -o "$response_file" -w '%{http_code}' -X POST \
+    -H 'Accept: application/json' "$SERVER/auth/device" || true)
+  case "$status" in
+    200) ;;
+    000) say "cannot reach $SERVER (network, VPN or TLS problem)"; exit 5 ;;
+    *)
+      detail=$(json_string detail)
+      say "the server refused to start a browser login (HTTP $status)${detail:+: $detail}"
+      exit 6 ;;
+  esac
+  local device_code user_code url interval expires deadline error
+  device_code=$(json_string device_code)
+  user_code=$(json_string user_code)
+  url=$(json_string verification_uri_complete)
+  interval=$(json_number interval); interval=${interval:-2}
+  expires=$(json_number expires_in); expires=${expires:-300}
+  if [ -z "$device_code" ] || [ -z "$url" ]; then
+    say "the server answered without a login code"
+    exit 7
+  fi
+
+  say "sign in from your browser to finish the login:"
+  say "    $url"
+  say "    code: $user_code"
+  if open_browser "$url"; then
+    say "a browser window should open; if it does not, open the address above"
+  fi
+
+  deadline=$(( $(date +%s) + expires ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    sleep "$interval"
+    status=$(curl -sS -o "$response_file" -w '%{http_code}' -X POST \
+      -H 'Content-Type: application/json' -H 'Accept: application/json' \
+      -d "{\"device_code\":\"$device_code\"}" "$SERVER/auth/device/token" || true)
+    case "$status" in
+      200) return 0 ;;
+      000) continue ;;  # a network blip while waiting is not fatal
+      400)
+        error=$(json_string error)
+        case "$error" in
+          authorization_pending) continue ;;
+          slow_down) interval=$(( interval + 2 )); continue ;;
+          *)
+            detail=$(json_string detail)
+            say "browser login failed${detail:+: $detail}"
+            exit 8 ;;
+        esac ;;
+      *)
+        detail=$(json_string detail)
+        say "browser login rejected by $SERVER (HTTP $status)${detail:+: $detail}"
+        exit 6 ;;
+    esac
+  done
+  say "the login code expired before it was approved; run the login again"
+  exit 8
+}
+
 if [ -n "$CORP_TOKEN" ]; then
   say "authenticating with the corporate API key"
   status=$(curl -sS -o "$response_file" -w '%{http_code}' -X POST \
@@ -74,18 +169,7 @@ elif [ -n "$CORP_USER" ]; then
     -u "$CORP_USER:$CORP_PASSWORD" -H 'Accept: application/json' \
     "$SERVER/auth/token" || true)
 else
-  cat >&2 <<MSG
-opencode-corp: no corporate credentials found.
-
-Provide one of these, then run the login again:
-
-  export OPENCODE_CORP_TOKEN=<api key>
-  export OPENCODE_CORP_USER=<user> OPENCODE_CORP_PASSWORD=<password>
-
-  or write $CRED_FILE (chmod 600):
-    token = <api key>
-MSG
-  exit 4
+  browser_login
 fi
 
 # curl writes 000 into -w when it never got a response at all.

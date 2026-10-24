@@ -43,12 +43,32 @@ curl -fsS http://localhost:8000/health
 Now connect a machine that has OpenCode v2:
 
 ```bash
-export OPENCODE_CORP_USER=ana.ruiz OPENCODE_CORP_PASSWORD='the password you set'
 opencode auth login http://localhost:8000
+```
+
+OpenCode prints a sign-in address and a code, and opens the browser when it can.
+The employee signs in there — username and password, a corporate API key, or a
+Bifrost virtual key — and OpenCode finishes on its own:
+
+```
+│  opencode-corp: sign in from your browser to finish the login:
+│  opencode-corp:     http://localhost:8000/login?code=U86XN7R8
+│  opencode-corp:     code: U86X-N7R8
+◆  Connected to localhost
 ```
 
 That is the whole employee experience. Their own settings keep winning; the
 corporate ones fill in everything they have not set.
+
+**Machines without a browser** (CI, build agents) skip the browser by
+providing a credential up front, in this order of precedence:
+`OPENCODE_CORP_TOKEN` (an API key), then `OPENCODE_CORP_USER` +
+`OPENCODE_CORP_PASSWORD`, then a `~/.config/opencode-corp/credentials` file
+(mode `600`). Mind *where* those variables live: the login command is started by
+the OpenCode **server**, with the server's environment. Exported in your shell
+they only reach it with `opencode auth login --standalone`, which starts a
+private server from that shell. `OPENCODE_CORP_NO_BROWSER=1` prints the address
+without trying to open it.
 
 <details>
 <summary><b>If the login fails</b> — the four things it is, almost always</summary>
@@ -57,7 +77,8 @@ corporate ones fill in everything they have not set.
 | --- | --- |
 | `Failed to load wellknown manifest` | the server is unreachable, or you put `/.well-known/opencode` behind auth — it must be public, it is what explains *how* to authenticate |
 | `No authentication method found at …` | the manifest has no `auth` block |
-| `Authentication command returned no credential` | the login script printed nothing on stdout. Its stderr is in the TUI and says why: no credentials found, a world-readable credentials file, a rejected password |
+| `Authentication command returned no credential` | the login script printed nothing on stdout. Its stderr is in the TUI and says why: a world-readable credentials file, a rejected password |
+| `the login code expired before it was approved` | nobody signed in at the printed address within `OCS_DEVICE_TTL` (5 minutes by default); run the login again |
 | login works, no corporate settings appear | the token is being rejected by `/config/opencode.json`. Check `OCS_SESSION_ENV` matches the `{env:…}` placeholder in `config/opencode.jsonc` |
 
 </details>
@@ -122,8 +143,13 @@ OpenCode — MDM, a managed image, CI. The two properties cannot both hold.
      │◀── {auth:{command,env}, remote_config} ─
      │
      │    runs auth.command: bash, no shell profile, stdin closed
-     ├─── POST /auth/token ───────────────────▶  password or API key
+     ├─── POST /auth/device ──────────────────▶  login code, nobody signed in yet
+     │◀── {device_code, user_code, …} ────────
+     │    prints /login?code=… — the employee signs in in a browser,
+     │    which posts the code + credentials to /login/approve
+     ├─── POST /auth/device/token (polls) ────▶  answered once the code is approved
      │◀── {"token":"v1.…"} ───────────────────   signed, stateless, 90 days
+     │    (CI: POST /auth/token with the credential instead of the browser)
      │    runs the bootstrap installer (hindsight, …)
      │    prints the token on stdout → stored by the harness as a credential
      │
@@ -138,6 +164,10 @@ OpenCode — MDM, a managed image, CI. The two properties cannot both hold.
 | --- | --- | --- | --- |
 | `GET` | `/.well-known/opencode` | none | discovery manifest |
 | `POST` | `/auth/token` | Basic or `X-Api-Key` | static credentials → session token |
+| `POST` | `/auth/device` | none | start a browser login: device code + user code |
+| `POST` | `/auth/device/token` | device code | polled; the session token once the code is approved |
+| `GET` | `/login` | none | the browser sign-in page |
+| `POST` | `/login/approve` | credentials in body | approve a user code with a password, API key or Bifrost key |
 | `GET` | `/config/opencode.json` | `Bearer` | the corporate configuration |
 | `GET` | `/skills/{token}/index.json` | token in path | remote skill index |
 | `GET` | `/skills/{token}/{name}/{file}` | token in path | remote skill file |

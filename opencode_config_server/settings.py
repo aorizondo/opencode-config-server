@@ -47,6 +47,15 @@ class Settings:
     environment: str = "development"
     rate_limit_attempts: int = 10
     rate_limit_window_seconds: int = 300
+    #: Lifetime of a browser-login code. The harness kills the login command
+    #: after 10 minutes, so it is capped below that.
+    device_ttl_seconds: int = 300
+    #: Bifrost gateway origin. When set, `sk-bf-*` virtual keys are accepted as
+    #: credentials and checked live against Bifrost; empty disables them.
+    bifrost_url: str = ""
+    #: Sessions opened with a virtual key are not in users.json, so revoking the
+    #: key in Bifrost only ends them when they expire: keep them short.
+    vk_token_ttl_days: int = 7
     bootstrap_enabled: bool = True
     skills_enabled: bool = True
     #: Honour X-Forwarded-For when rate limiting. Only enable behind a proxy
@@ -110,6 +119,9 @@ def load(**overrides: object) -> Settings:
         rate_limit_window_seconds=int(
             overrides.pop("rate_limit_window_seconds", _env_int("OCS_RATE_LIMIT_WINDOW", 300)),
         ),
+        device_ttl_seconds=int(overrides.pop("device_ttl_seconds", _env_int("OCS_DEVICE_TTL", 300))),
+        bifrost_url=str(overrides.pop("bifrost_url", os.getenv("OCS_BIFROST_URL", ""))).rstrip("/"),
+        vk_token_ttl_days=int(overrides.pop("vk_token_ttl_days", _env_int("OCS_VK_TOKEN_TTL_DAYS", 7))),
         bootstrap_enabled=bool(overrides.pop("bootstrap_enabled", _env_bool("OCS_BOOTSTRAP_ENABLED", True))),
         skills_enabled=bool(overrides.pop("skills_enabled", _env_bool("OCS_SKILLS_ENABLED", True))),
         trust_proxy=bool(overrides.pop("trust_proxy", _env_bool("OCS_TRUST_PROXY", False))),
@@ -117,6 +129,17 @@ def load(**overrides: object) -> Settings:
     )
     if overrides:
         raise SettingsError(f"unknown settings: {', '.join(sorted(map(str, overrides)))}")
+    if settings.production and settings.bifrost_url and not settings.bifrost_url.startswith("https://"):
+        raise SettingsError(
+            f"OCS_BIFROST_URL must be https in production (virtual keys travel to it), got {settings.bifrost_url!r}"
+        )
+    if settings.vk_token_ttl_days < 1:
+        raise SettingsError(f"OCS_VK_TOKEN_TTL_DAYS must be at least 1, got {settings.vk_token_ttl_days}")
+    if not 60 <= settings.device_ttl_seconds <= 540:
+        raise SettingsError(
+            f"OCS_DEVICE_TTL must be between 60 and 540 seconds (the harness gives up after 600), "
+            f"got {settings.device_ttl_seconds}"
+        )
     if not settings.session_env.isidentifier():
         raise SettingsError(f"OCS_SESSION_ENV must be a valid variable name, got {settings.session_env!r}")
     return settings

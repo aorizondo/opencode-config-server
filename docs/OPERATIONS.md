@@ -134,6 +134,11 @@ employee's next config refresh fails with a logged warning and they must run
 | `opencode auth login` fails with "Failed to load wellknown manifest" | `/.well-known/opencode` unreachable, or behind auth — it must be public |
 | "No authentication method found at …" | the manifest has no `auth` block |
 | Login fails with "Authentication command returned no credential" | the login script printed nothing on stdout; check its stderr in the TUI |
+| "the login code expired before it was approved" | nobody signed in at the printed address in time; raise `OCS_DEVICE_TTL` (max 540 s) if employees need longer |
+| The browser does not open | the OpenCode server has no `DISPLAY`/`WAYLAND_DISPLAY` (a headless service); the address is printed, open it by hand |
+| "Bifrost virtual keys are not accepted by this server" | `OCS_BIFROST_URL` is not set |
+| "cannot validate the virtual key right now (Bifrost unavailable)" (`503`) | `OCS_BIFROST_URL` unreachable, or Bifrost answered something other than 200/401/403 |
+| A CI login waits for a browser instead of using its credential | the credential variables are not in the OpenCode server's environment; use `opencode auth login --standalone` |
 | Login succeeds but no corporate settings appear | the token is rejected by `/config/opencode.json`; check `OCS_SESSION_ENV` matches the `{env:…}` in the document |
 | Skills never update | the index is served without `version`, or the employee's cache under `~/.cache/opencode/skills` predates it |
 | Everything works for one employee and not another | the other employee has the same keys set locally — local wins, by design |
@@ -145,6 +150,9 @@ served document. They never record a token, a password or a hash.
 
 - The rate limiter is per process and in memory. Behind more than one replica,
   or for a real lockout policy, do it at the edge.
+- Pending browser logins are in memory too. A restart, or a second replica
+  answering the poll, costs the employee a retry of `opencode auth login`; run
+  one replica, or pin `/auth/device*` and `/login*` to one.
 - `OCS_TRUST_PROXY=true` makes the limiter believe `X-Forwarded-For`. Enable it
   only when the proxy in front sets that header itself, otherwise any client can
   forge its own bucket.

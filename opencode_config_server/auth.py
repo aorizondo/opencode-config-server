@@ -1,9 +1,10 @@
 """Static credentials and signed session tokens.
 
-Two ways in, both static by design (no IdP, no OAuth round trip):
+Three ways in, all static by design (no IdP, no OAuth round trip):
 
-  * username + password  -> PBKDF2-HMAC-SHA256 hashes in `users.json`
-  * API key              -> SHA-256 digests in `users.json`, for CI and headless
+  * username + password   -> PBKDF2-HMAC-SHA256 hashes in `users.json`
+  * API key               -> SHA-256 digests in `users.json`, for CI and headless
+  * Bifrost virtual key   -> `sk-bf-*`, checked live against Bifrost (optional)
 
 Both exchange into the same artefact: an opaque, HMAC-signed session token the
 harness stores as a credential and replays on every later request. The harness
@@ -19,6 +20,8 @@ import hmac
 import json
 import secrets
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,6 +30,11 @@ PBKDF2_ITERATIONS = 600_000
 PBKDF2_PREFIX = "pbkdf2_sha256"
 API_KEY_PREFIX = "sha256"
 TOKEN_VERSION = "v1"
+#: Bifrost virtual keys carry this prefix; anything else is a local API key.
+VIRTUAL_KEY_PREFIX = "sk-bf-"
+#: Subjects of sessions opened with a Bifrost virtual key. Reserved: no entry in
+#: users.json may use it, so a local account can never impersonate one.
+VIRTUAL_KEY_SUBJECT = "vk:"
 
 # Verified against this when the user does not exist, so a wrong username and a
 # wrong password cost the same.
@@ -90,6 +98,8 @@ class User:
         name = raw.get("name")
         if not isinstance(name, str) or not name.strip():
             raise AuthError("each user needs a non-empty name")
+        if name.startswith(VIRTUAL_KEY_SUBJECT):
+            raise AuthError(f"user names may not start with {VIRTUAL_KEY_SUBJECT!r}: {name!r}")
         keys = raw.get("api_keys", [])
         if isinstance(keys, str):
             keys = [keys]
@@ -197,6 +207,51 @@ class UserStore:
         raise AuthError("invalid API key")
 
 
+class BifrostUnavailable(Exception):
+    """Bifrost could not answer. Not a credential failure: never count it as one."""
+
+
+class BifrostKeys:
+    """Checks Bifrost virtual keys with Bifrost's self-service quota endpoint.
+
+    `GET /api/governance/virtual-keys/quota` authenticates with the key itself, so
+    no Bifrost admin credential lives here (transports/bifrost-http/handlers/
+    governance.go). Its answers:
+
+        401  missing or unknown key
+        403  expired key
+        200  the key exists -- *including inactive keys*, which Bifrost serves on
+             purpose with `is_active: false`. So 200 alone does not mean "valid".
+    """
+
+    def __init__(self, base_url: str, *, timeout: float = 5.0) -> None:
+        self._url = f"{base_url.rstrip('/')}/api/governance/virtual-keys/quota"
+        self._timeout = timeout
+
+    def authenticate(self, key: str) -> User:
+        request = urllib.request.Request(
+            self._url,
+            # x-bf-vk takes any key value; the other headers insist on the sk-bf- prefix.
+            headers={"x-bf-vk": key, "Accept": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout) as response:  # noqa: S310
+                body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            if error.code == 401:
+                raise AuthError("invalid virtual key") from error
+            if error.code == 403:
+                raise AuthError("this virtual key has expired") from error
+            raise BifrostUnavailable(f"Bifrost answered HTTP {error.code}") from error
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
+            raise BifrostUnavailable(f"cannot reach Bifrost: {error}") from error
+        if not isinstance(body, dict) or not isinstance(body.get("virtual_key_name"), str):
+            raise BifrostUnavailable("unexpected answer from Bifrost's quota endpoint")
+        if body.get("is_active") is not True:
+            raise AuthError("this virtual key is inactive")
+        return User(name=f"{VIRTUAL_KEY_SUBJECT}{body['virtual_key_name']}")
+
+
 @dataclass(frozen=True)
 class Claims:
     subject: str
@@ -221,9 +276,10 @@ class SessionTokens:
     def _sign(self, payload: str) -> str:
         return _b64encode(hmac.new(self._secret, payload.encode("ascii"), hashlib.sha256).digest())
 
-    def issue(self, user: User, *, now: int | None = None) -> tuple[str, Claims]:
+    def issue(self, user: User, *, now: int | None = None, ttl_seconds: int | None = None) -> tuple[str, Claims]:
         issued = int(time.time() if now is None else now)
-        claims = Claims(subject=user.name, version=user.version, issued_at=issued, expires_at=issued + self._ttl)
+        lifetime = self._ttl if ttl_seconds is None else ttl_seconds
+        claims = Claims(subject=user.name, version=user.version, issued_at=issued, expires_at=issued + lifetime)
         body = {"sub": claims.subject, "ver": claims.version, "iat": claims.issued_at, "exp": claims.expires_at}
         payload = _b64encode(json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8"))
         return f"{TOKEN_VERSION}.{payload}.{self._sign(payload)}", claims
