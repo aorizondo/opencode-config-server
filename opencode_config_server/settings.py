@@ -61,6 +61,11 @@ class Settings:
     #: Honour X-Forwarded-For when rate limiting. Only enable behind a proxy
     #: you control, otherwise clients can forge their own rate-limit bucket.
     trust_proxy: bool = False
+    #: Shared secret for the web admin panel at /admin. Empty disables the
+    #: panel entirely (its routes are not even mounted).
+    admin_token: str = field(default="", repr=False)
+    #: Lifetime of a browser session in the admin panel.
+    admin_session_hours: int = 8
     ephemeral_secret: bool = field(default=False, compare=False)
 
     @property
@@ -125,6 +130,8 @@ def load(**overrides: object) -> Settings:
         bootstrap_enabled=bool(overrides.pop("bootstrap_enabled", _env_bool("OCS_BOOTSTRAP_ENABLED", True))),
         skills_enabled=bool(overrides.pop("skills_enabled", _env_bool("OCS_SKILLS_ENABLED", True))),
         trust_proxy=bool(overrides.pop("trust_proxy", _env_bool("OCS_TRUST_PROXY", False))),
+        admin_token=str(overrides.pop("admin_token", os.getenv("OCS_ADMIN_TOKEN", ""))).strip(),
+        admin_session_hours=int(overrides.pop("admin_session_hours", _env_int("OCS_ADMIN_SESSION_HOURS", 8))),
         ephemeral_secret=ephemeral,
     )
     if overrides:
@@ -139,6 +146,15 @@ def load(**overrides: object) -> Settings:
         raise SettingsError(
             f"OCS_DEVICE_TTL must be between 60 and 540 seconds (the harness gives up after 600), "
             f"got {settings.device_ttl_seconds}"
+        )
+    if settings.admin_token and len(settings.admin_token) < 32 and settings.production:
+        raise SettingsError(
+            "OCS_ADMIN_TOKEN must be at least 32 characters in production; "
+            "generate one with: python -m opencode_config_server.secret --admin"
+        )
+    if not 1 <= settings.admin_session_hours <= 24:
+        raise SettingsError(
+            f"OCS_ADMIN_SESSION_HOURS must be between 1 and 24, got {settings.admin_session_hours}"
         )
     if not settings.session_env.isidentifier():
         raise SettingsError(f"OCS_SESSION_ENV must be a valid variable name, got {settings.session_env!r}")

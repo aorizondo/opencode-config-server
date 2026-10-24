@@ -100,6 +100,31 @@ skill URLs, so plain HTTP would hand them to anyone on the path.
 TLS terminates in front of the container; the app itself listens on
 `127.0.0.1:8000`. Full checklist in [`docs/SECURITY.md`](docs/SECURITY.md#hardening-checklist).
 
+## The admin panel
+
+Set `OCS_ADMIN_TOKEN` and open `/admin`: a web panel for everything below,
+without touching the files by hand.
+
+```bash
+python -m opencode_config_server.secret --admin >> .env   # OCS_ADMIN_TOKEN
+docker compose -f docker-compose.yml -f docker-compose.admin.yml up -d
+```
+
+| Section | What it edits |
+| --- | --- |
+| Configuration | `opencode.jsonc` through forms — model and defaults, agents, slash commands, MCP servers, permissions and policies, plugins — or as raw text in the Advanced tab, where comments survive |
+| Users | create accounts, set passwords, issue API keys (shown once), disable, sign out everywhere, delete |
+| Skills | create skills, edit their files, see what is published and at which version |
+| Installer | `bootstrap/install.sh`, checked with `bash -n` before it is saved |
+
+It writes the same files you would edit by hand, so both keep working. Every
+save is checked first (the shapes OpenCode v2 accepts, `{file:~/.ssh…}` refused,
+literal secrets in MCP headers flagged), written atomically, refused if someone
+else changed the file meanwhile, and the previous version is kept in
+`config/.history` with a one-click restore. Without `OCS_ADMIN_TOKEN` the panel
+is not mounted at all. Details in [`docs/OPERATIONS.md`](docs/OPERATIONS.md#the-admin-panel)
+and [`docs/SECURITY.md`](docs/SECURITY.md#the-admin-panel).
+
 ## Day-to-day: I want X, I do Y
 
 | I want to… | Do this |
@@ -114,7 +139,8 @@ TLS terminates in front of the container; the app itself listens on
 | install a tool on every machine | add a step to `config/bootstrap/install.sh` and bump its `VERSION` |
 
 Everything above takes effect without a restart: `users.json` on the next
-request, the configuration and skills on each client's next refresh.
+request, the configuration and skills on each client's next refresh. Each row
+also has a button in the [admin panel](#the-admin-panel).
 
 ## What can be delivered, and who wins
 
@@ -216,7 +242,7 @@ the employee's machine.
 ## Tests
 
 ```bash
-pytest                              # 169 tests, ~4s
+pytest                              # 268 tests
 pytest tests/test_login_e2e.py      # the real login script against a real server
 pytest tests/test_harness_schema.py # the served document against OpenCode's own schema
 ```
@@ -237,7 +263,7 @@ Two suites check more than our own assumptions:
 | | |
 | --- | --- |
 | [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | the harness contract, verified against the v2 sources, with `file:line` references |
-| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | accounts, revocation, publishing skills, rotating secrets, troubleshooting |
+| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | the admin panel, accounts, revocation, publishing skills, rotating secrets, troubleshooting |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | trust model, what a leaked token buys, hardening checklist |
 | [`docs/MIGRATION.md`](docs/MIGRATION.md) | what changed from 1.x and why that design could not work |
 | [`DEVELOPMENT.md`](DEVELOPMENT.md) | layout, conventions, where to add a test |

@@ -103,6 +103,39 @@ Unsetting `OCS_BIFROST_URL` invalidates all of them at once; rotating
 being enforced by Bifrost for inference, so what lingers is read access to the
 corporate configuration.
 
+## The admin panel
+
+Mounted only when `OCS_ADMIN_TOKEN` is set; otherwise `/admin` does not exist.
+Treat the token like the `config/` directory it unlocks: it can change what runs
+on every employee's machine (plugins, the installer).
+
+- **One shared token**, compared in constant time and rate limited like the
+  employee logins (`OCS_RATE_LIMIT_*`, bucket per client). Production refuses to
+  start with a token shorter than 32 characters.
+- **Browser sessions** are an HMAC-signed expiry in a cookie that is `HttpOnly`,
+  `SameSite=Strict`, `Path=/admin`, and `Secure` whenever the base URL is https.
+  The signing key is derived from `OCS_SESSION_SECRET` *and* the admin token, so
+  rotating either ends every panel session. The cookie never contains the token.
+- **CSRF**: requests riding on the cookie must also send `X-OCS-Admin: 1`.
+  Another origin cannot add that header without a CORS preflight, and this
+  server answers none.
+- **The page** is static HTML with an external script and stylesheet under
+  `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self';
+  frame-ancestors 'none'`, plus `X-Frame-Options: DENY`, `no-store` and
+  `nosniff`. The script builds the DOM with `textContent` only — a test fails if
+  `innerHTML` ever appears.
+- **Secrets stay out of the browser**: password hashes and API key digests are
+  never returned; a new API key is shown exactly once. Old versions of
+  `users.json` in the history can be restored but not read. The history
+  directory is `0700` and its files `0600`.
+- **Session tokens of employees do not open the panel**, and the panel does not
+  appear in `/openapi.json`.
+- **Audit**: every change is logged as `admin <action> from <ip>`.
+
+What the panel does not give you is per-person accountability: there is one
+token. If several people administer the server, put `/admin` behind your SSO
+proxy and keep the token as the second factor.
+
 ## The server is trusted by every client
 
 An employee who logs in grants this server the ability to set their agents,
@@ -138,7 +171,11 @@ it outside OpenCode: MDM, a managed image, or CI checks.
       in a secret store and not in the image
 - [ ] `config/users.json` outside the image (`OCS_USERS_FILE`) or mounted
       read-only, `0600`
-- [ ] `config/` mounted read-only — the server never writes to it
+- [ ] `config/` mounted read-only — unless the admin panel is enabled, which
+      needs it writable (`docker-compose.admin.yml`)
+- [ ] `OCS_ADMIN_TOKEN` unset, or 32+ characters from
+      `python -m opencode_config_server.secret --admin` and kept in a secret
+      store; `/admin` reachable only from your network or behind SSO
 - [ ] container as non-root, `cap_drop: ALL`, `read_only: true`
 - [ ] access logs for `/skills/` redacted
 - [ ] `OCS_TRUST_PROXY` true only behind a proxy that sets `X-Forwarded-For`

@@ -1,0 +1,19 @@
+# Opt-in override for the web admin panel at /admin:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.admin.yml up -d
+#
+# The panel edits ./config in place, so this remounts it read-write (Compose
+# merges volumes by their container path). The container runs as uid 1000:
+#
+#   sudo chown -R 1000:1000 config
+#
+# Every save keeps the previous version in config/.history (0700), and the
+# server logs who-changed-what as "admin <action> from <ip>".
+services:
+  opencode-config:
+    environment:
+      # Generate with: python -m opencode_config_server.secret --admin
+      OCS_ADMIN_TOKEN: ${OCS_ADMIN_TOKEN:?generate one with python -m opencode_config_server.secret --admin}
+      OCS_ADMIN_SESSION_HOURS: ${OCS_ADMIN_SESSION_HOURS:-8}
+    volumes:
+      - ./config:/app/config

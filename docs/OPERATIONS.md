@@ -19,6 +19,42 @@ TLS terminates in front of the container; the app speaks plain HTTP on
 `127.0.0.1:8000`. The server refuses to start with `OCS_ENV=production` unless
 `OCS_BASE_URL` is `https://` and `OCS_SESSION_SECRET` is set.
 
+## The admin panel
+
+`/admin` is a web panel over the same files this document describes. It is
+mounted only when `OCS_ADMIN_TOKEN` is set:
+
+```bash
+python -m opencode_config_server.secret --admin >> .env   # OCS_ADMIN_TOKEN
+sudo chown -R 1000:1000 config                            # the container's user
+docker compose -f docker-compose.yml -f docker-compose.admin.yml up -d
+```
+
+The override remounts `config/` read-write; the default compose file keeps it
+read-only, which is still the right choice when the panel is off. Without write
+access the panel opens in read-only mode and says which file it cannot change.
+
+Sign in with the token. The browser gets a session cookie that lasts
+`OCS_ADMIN_SESSION_HOURS` (8 by default, 1–24); scripts send the token as
+`Authorization: Bearer …` to the same JSON API under `/admin/api/`.
+
+| Section | Notes |
+| --- | --- |
+| Configuration | Forms for model and defaults, agents, commands, MCP servers, permissions and policies, plugins. Saving from a form rewrites `opencode.jsonc` as plain JSON, so its comments go (the panel asks first); the **Advanced** tab edits the file as text and keeps them. **Check & preview** shows the document exactly as employees receive it. |
+| Users | API keys are shown once, when created; only their digest is stored and the panel identifies them by a short fingerprint. **Sign out everywhere** bumps `version`. Unknown fields in `users.json` are preserved. A `users.json` that does not parse is never overwritten: fix it by hand first. |
+| Skills | Only small text files with a published extension can be created or edited; other files in a skill folder are listed but never shown. Each save changes the skill's version, so employees re-download it. |
+| Installer | Refused if `bash -n` reports a syntax error. |
+
+**Every save** is validated, written atomically (temp file + rename), refused
+with "changed since it was loaded" when the file changed after the editor opened
+it, and the replaced version goes to `config/.history/` — the last 30 per file,
+restorable from each section's **History** button. Old versions of `users.json`
+can be restored but are never displayed, since they hold password hashes.
+
+Every change is logged as `admin <action> from <ip>`. There is one shared admin
+token, so the log tells you what changed and from where, not who: put the panel
+behind your SSO proxy if you need per-person attribution.
+
 ## Accounts
 
 `config/users.json`:
@@ -138,6 +174,9 @@ employee's next config refresh fails with a logged warning and they must run
 | The browser does not open | the OpenCode server has no `DISPLAY`/`WAYLAND_DISPLAY` (a headless service); the address is printed, open it by hand |
 | "Bifrost virtual keys are not accepted by this server" | `OCS_BIFROST_URL` is not set |
 | "cannot validate the virtual key right now (Bifrost unavailable)" (`503`) | `OCS_BIFROST_URL` unreachable, or Bifrost answered something other than 200/401/403 |
+| The panel says a file is read-only | `config/` is mounted `:ro`, or not owned by uid 1000 inside the container; use `docker-compose.admin.yml` and `chown` |
+| "changed since it was loaded" when saving in the panel | another admin, or a hand edit, saved the file after you opened it; reload and redo the change |
+| `/admin` answers 404 | `OCS_ADMIN_TOKEN` is not set |
 | A CI login waits for a browser instead of using its credential | the credential variables are not in the OpenCode server's environment; use `opencode auth login --standalone` |
 | Login succeeds but no corporate settings appear | the token is rejected by `/config/opencode.json`; check `OCS_SESSION_ENV` matches the `{env:…}` in the document |
 | Skills never update | the index is served without `version`, or the employee's cache under `~/.cache/opencode/skills` predates it |
@@ -150,6 +189,8 @@ served document. They never record a token, a password or a hash.
 
 - The rate limiter is per process and in memory. Behind more than one replica,
   or for a real lockout policy, do it at the edge.
+- The admin panel serialises writes per process. Two replicas editing the same
+  file are still caught by the ETag check, but run the panel on one replica.
 - Pending browser logins are in memory too. A restart, or a second replica
   answering the poll, costs the employee a retry of `opencode auth login`; run
   one replica, or pin `/auth/device*` and `/login*` to one.

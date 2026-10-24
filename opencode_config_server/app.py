@@ -11,6 +11,7 @@
     GET  /skills/{token}/{name}/{file}  in-path   remote skill file
     GET  /bootstrap/install.sh          bearer    one-off installer
     GET  /health                        public    liveness, no secrets
+    GET  /admin, /admin/api/...         admin     web admin panel (only with OCS_ADMIN_TOKEN)
 
 Only the manifest, /health, the login page and the start of a browser login are
 unauthenticated. None of them returns a secret: the manifest holds the login
@@ -35,7 +36,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from . import configdoc, manifest, skills
+from . import admin, configdoc, manifest, skills
 from .auth import (
     VIRTUAL_KEY_PREFIX,
     VIRTUAL_KEY_SUBJECT,
@@ -383,9 +384,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logger.info("served bootstrap to %s", claims.subject)
         return PlainTextResponse(content=script, media_type="text/x-shellscript", headers=NO_STORE)
 
-    @app.get("/health", tags=["ops"])
-    async def health() -> dict[str, Any]:
-        """Deployment self-check. Reports readiness without leaking anything."""
+    def health_report() -> dict[str, Any]:
         problems: list[str] = []
         users.reload(force=True)
         if users.error:
@@ -405,6 +404,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "skills": len(skills.discover(config.skills_dir)),
             "problems": problems,
         }
+
+    @app.get("/health", tags=["ops"])
+    async def health() -> dict[str, Any]:
+        """Deployment self-check. Reports readiness without leaking anything."""
+        return health_report()
+
+    if config.admin_token:
+        admin.install(
+            app, config=config, users=users, limiter=limiter, client_key=client_key, report=health_report
+        )
 
     return app
 

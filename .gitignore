@@ -88,3 +88,6 @@ config/users.*.json
 
 # Local corporate overrides
 config/opencode.local.jsonc
+
+# Admin panel: previous versions of every saved file (may hold password hashes)
+config/.history/
