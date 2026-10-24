@@ -619,3 +619,50 @@ class TestRegisteredBifrostKeys:
             await client.patch("/admin/api/users/ana.ruiz", json={"disabled": True}, headers=BEARER)
             rejected = await client.post("/auth/token", headers={"X-Api-Key": ACTIVE_VK})
             assert rejected.status_code == 401 and "disabled" in rejected.json()["detail"]
+
+
+class TestMcpCommands:
+    """OpenCode runs command[0] with command[1:] as arguments, without a shell."""
+
+    def test_a_joined_command_line_is_flagged(self):
+        _, warnings = configdoc.check(
+            {"mcp": {"servers": {"fs": {"type": "local", "command": ["npx -y @modelcontextprotocol/server-filesystem /srv"]}}}}
+        )
+        assert any("single string with spaces" in warning for warning in warnings)
+        _, clean = configdoc.check(
+            {"mcp": {"servers": {"fs": {"type": "local", "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/srv"]}}}}
+        )
+        assert clean == []
+
+    def test_tilde_is_flagged(self):
+        _, warnings = configdoc.check({"mcp": {"servers": {"fs": {"type": "local", "command": ["npx", "server", "~/projects"]}}}})
+        assert any("not expanded" in warning for warning in warnings)
+
+    @pytest.mark.skipif(__import__("shutil").which("node") is None, reason="needs node to run the panel script")
+    def test_the_panel_splits_command_lines_like_a_shell(self):
+        import subprocess
+
+        script = r"""
+const src = require("fs").readFileSync(process.argv[1], "utf8");
+const body = src.slice(src.indexOf("  function splitCommand"), src.indexOf("  function formatBytes"));
+const { splitCommand, joinCommand } = new Function(body + "; return { splitCommand, joinCommand };")();
+const cases = JSON.parse(process.argv[2]);
+const out = cases.map(([line]) => splitCommand(line));
+const round = cases.map(([, want]) => splitCommand(joinCommand(want)).args);
+console.log(JSON.stringify({ out, round }));
+"""
+        cases = [
+            ['npx -y @scope/server "/home/ana/My Projects"', ["npx", "-y", "@scope/server", "/home/ana/My Projects"]],
+            ["docker run -i --rm mcp/fetch", ["docker", "run", "-i", "--rm", "mcp/fetch"]],
+            ["node -e 'console.log(\"a b\")'", ["node", "-e", 'console.log("a b")']],
+            ['cmd My\\ Dir "say \\"hi\\""', ["cmd", "My Dir", 'say "hi"']],
+            ["C:\\tools\\mcp.exe --flag", ["C:\\tools\\mcp.exe", "--flag"]],
+            ["  uvx  mcp-server-git  --repository {env:HOME}/repo ", ["uvx", "mcp-server-git", "--repository", "{env:HOME}/repo"]],
+        ]
+        panel = Path(admin.__file__).with_name("panel") / "admin.js"
+        result = subprocess.run(["node", "-e", script, str(panel), json.dumps(cases)], capture_output=True, text=True, check=True)
+        data = json.loads(result.stdout)
+        assert [item["args"] for item in data["out"]] == [want for _, want in cases]
+        assert data["round"] == [want for _, want in cases], "what the panel shows splits back to the same list"
+        unclosed = subprocess.run(["node", "-e", script, str(panel), json.dumps([['npx "abc', []]])], capture_output=True, text=True, check=True)
+        assert "closing" in json.loads(unclosed.stdout)["out"][0]["error"]

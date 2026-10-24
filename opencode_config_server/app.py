@@ -1,6 +1,8 @@
 """HTTP surface of the enterprise configuration server.
 
-    GET  /.well-known/opencode          public    discovery manifest
+    GET  /.well-known/opencode          public    discovery manifest (bash login: Linux, macOS)
+    GET  /windows/.well-known/opencode  public    discovery manifest (PowerShell login: Windows)
+    GET  /login.ps1                     public    the Windows login script the manifest pins
     POST /auth/token                    static    credentials -> session token
     POST /auth/device                   public    start a browser login (code pair)
     POST /auth/device/token             device    browser-approved code -> session token
@@ -9,7 +11,12 @@
     GET  /config/opencode.json          bearer    corporate configuration
     GET  /skills/{token}/index.json     in-path   remote skill index
     GET  /skills/{token}/{name}/{file}  in-path   remote skill file
-    GET  /bootstrap/install.sh          bearer    one-off installer
+    GET  /bootstrap/install.sh          bearer    one-off installer (install.ps1 on Windows)
+    GET  /bootstrap/names               bearer    names of the variables that apply to the employee
+    POST /bootstrap/own-env             bearer    which of them the employee defines themselves
+    GET  /bootstrap/skill-names         bearer    every published skill name (unfiltered)
+    POST /bootstrap/own-skills          bearer    corporate skill names the employee has their own of
+    GET  /bootstrap/env                 bearer    variables to set in the machine's OpenCode service
     GET  /health                        public    liveness, no secrets
     GET  /admin, /admin/api/...         admin     web admin panel (only with OCS_ADMIN_TOKEN)
 
@@ -36,7 +43,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from . import admin, configdoc, manifest, skills
+from . import admin, configdoc, manifest, skills, variables
 from .auth import (
     VIRTUAL_KEY_PREFIX,
     VIRTUAL_KEY_SUBJECT,
@@ -61,6 +68,10 @@ _LOGIN_PAGE = Path(__file__).with_name("login.html")
 
 class DeviceTokenRequest(BaseModel):
     device_code: str
+
+
+class OwnEnvReport(BaseModel):
+    names: list[str] = []
 
 
 class ApproveRequest(BaseModel):
@@ -96,6 +107,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         window_seconds=config.rate_limit_window_seconds,
     )
     devices = DeviceFlow(ttl_seconds=config.device_ttl_seconds)
+    values = variables.VariableStore(config.variables_file)
+    own_names = variables.EmployeeNames(config.state_dir / "employee-env.json")
+    own_skills = variables.EmployeeNames(config.state_dir / "employee-skills.json")
     bifrost = BifrostKeys(config.bifrost_url) if config.bifrost_url else None
 
     app = FastAPI(
@@ -213,6 +227,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def discovery() -> JSONResponse:
         """Public manifest. `opencode auth login <origin>` starts here."""
         return JSONResponse(content=manifest.build(config))
+
+    @app.get(manifest.WINDOWS_PATH + "/.well-known/opencode", tags=["discovery"])
+    async def windows_discovery() -> JSONResponse:
+        """Same, for `opencode auth login <origin>/windows`: logs in with PowerShell."""
+        return JSONResponse(content=manifest.build(config, windows=True))
+
+    @app.get("/login.ps1", tags=["discovery"])
+    async def powershell_login() -> Response:
+        """The Windows login script. Public, like the bash one inlined in the
+        manifest; the Windows manifest pins its SHA-256."""
+        return Response(content=manifest.powershell_script(), media_type="text/plain; charset=utf-8", headers=NO_STORE)
 
     @app.post("/auth/token", tags=["auth"])
     async def issue_token(
@@ -360,6 +385,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="the corporate configuration is unavailable; contact IT",
             ) from error
+        # {env:NAME} the server defines for this employee is filled in here; any
+        # other name is left for OpenCode to resolve on their machine.
+        document = variables.apply(
+            document, variables.resolve(values.load(), claims.subject, own=own_names.get(claims.subject))
+        )
         logger.info("served corporate config to %s", claims.subject)
         return JSONResponse(content=document, headers=NO_STORE)
 
@@ -367,8 +397,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def skill_index(token: str) -> JSONResponse:
         if not config.skills_enabled:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="skills are disabled")
-        path_claims(token)
-        return JSONResponse(content=skills.index(config.skills_dir), headers=NO_STORE)
+        claims = path_claims(token)
+        index = skills.index(config.skills_dir)
+        # Skills the employee has their own version of: OpenCode loads remote
+        # sources after local folders, so ours would win; leave them out.
+        own = own_skills.get(claims.subject)
+        index["skills"] = [skill for skill in index["skills"] if skill["name"] not in own]
+        return JSONResponse(content=index, headers=NO_STORE)
 
     @app.get("/skills/{token}/{name}/{file_path:path}", tags=["skills"])
     async def skill_file(token: str, name: str, file_path: str) -> FileResponse:
@@ -382,19 +417,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         media_type = "text/markdown; charset=utf-8" if target.suffix == ".md" else None
         return FileResponse(target, media_type=media_type, headers=NO_STORE)
 
+    @app.get("/bootstrap/install.ps1", tags=["bootstrap"])
+    async def windows_bootstrap(claims: Annotated[Claims, Depends(bearer_claims)]) -> Response:
+        return serve_installer(config.windows_bootstrap_file, claims)
+
     @app.get("/bootstrap/install.sh", tags=["bootstrap"])
     async def bootstrap(claims: Annotated[Claims, Depends(bearer_claims)]) -> Response:
+        return serve_installer(config.bootstrap_file, claims)
+
+    def serve_installer(path: Path, claims: Claims) -> Response:
         if not config.bootstrap_enabled:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="bootstrap is disabled")
         try:
-            script = config.bootstrap_file.read_text(encoding="utf-8")
+            script = path.read_text(encoding="utf-8")
         except OSError as error:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="no bootstrap installer is published",
             ) from error
-        logger.info("served bootstrap to %s", claims.subject)
-        return PlainTextResponse(content=script, media_type="text/x-shellscript", headers=NO_STORE)
+        logger.info("served %s to %s", path.name, claims.subject)
+        media = "text/plain" if path.suffix == ".ps1" else "text/x-shellscript"
+        return PlainTextResponse(content=script, media_type=media, headers=NO_STORE)
 
     def health_report() -> dict[str, Any]:
         problems: list[str] = []
@@ -407,6 +450,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             configdoc.load(config)
         except configdoc.ConfigError as error:
             problems.append(str(error))
+        values.load()
+        if values.error:
+            problems.append(f"{values.error} (serving the last good variables)")
         if config.ephemeral_secret:
             problems.append("OCS_SESSION_SECRET is unset: tokens will break on restart")
         return {
@@ -417,6 +463,51 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "problems": problems,
         }
 
+    @app.get("/bootstrap/names", tags=["bootstrap"])
+    async def variable_names(claims: Annotated[Claims, Depends(bearer_claims)]) -> PlainTextResponse:
+        """Names (never values) of the variables that apply to this employee, so
+        the login command can tell which ones they already define themselves."""
+        names = sorted(variables.resolve_entries(values.load(), claims.subject))
+        return PlainTextResponse(content="".join(f"{name}\n" for name in names), headers=NO_STORE)
+
+    @app.post("/bootstrap/own-env", tags=["bootstrap"])
+    async def report_own_env(body: OwnEnvReport, claims: Annotated[Claims, Depends(bearer_claims)]) -> JSONResponse:
+        """The login command reports which of those names the employee defines in
+        their own environment; the server stops filling them in for them."""
+        applicable = set(variables.resolve_entries(values.load(), claims.subject))
+        own = {name for name in body.names if name in applicable}
+        own_names.set(claims.subject, own)
+        if own:
+            logger.info("%s keeps their own %s", claims.subject, ", ".join(sorted(own)))
+        return JSONResponse(content={"own": sorted(own)}, headers=NO_STORE)
+
+    @app.get("/bootstrap/skill-names", tags=["bootstrap"])
+    async def skill_names(claims: Annotated[Claims, Depends(bearer_claims)]) -> PlainTextResponse:
+        """Every published skill name, unfiltered: the login compares against this,
+        not against the employee's own (already filtered) catalogue."""
+        names = sorted(skill.name for skill in skills.discover(config.skills_dir))
+        return PlainTextResponse(content="".join(f"{name}\n" for name in names), headers=NO_STORE)
+
+    @app.post("/bootstrap/own-skills", tags=["bootstrap"])
+    async def report_own_skills(body: OwnEnvReport, claims: Annotated[Claims, Depends(bearer_claims)]) -> JSONResponse:
+        """The login command reports which corporate skill names the employee
+        also has in their own skills folder; those are left out of their index,
+        because OpenCode would otherwise let the remote one win."""
+        published = {skill.name for skill in skills.discover(config.skills_dir)}
+        own = {name for name in body.names if name in published}
+        own_skills.set(claims.subject, own)
+        if own:
+            logger.info("%s keeps their own skills %s", claims.subject, ", ".join(sorted(own)))
+        return JSONResponse(content={"own": sorted(own)}, headers=NO_STORE)
+
+    @app.get("/bootstrap/env", tags=["bootstrap"])
+    async def machine_env(claims: Annotated[Claims, Depends(bearer_claims)]) -> PlainTextResponse:
+        """Variables marked for the machine, for the login command to set in the
+        environment of the employee's OpenCode service. `NAME base64` per line."""
+        body = variables.machine_lines(variables.resolve_entries(values.load(), claims.subject))
+        logger.info("served %d machine variables to %s", body.count("\n"), claims.subject)
+        return PlainTextResponse(content=body, headers=NO_STORE)
+
     @app.get("/health", tags=["ops"])
     async def health() -> dict[str, Any]:
         """Deployment self-check. Reports readiness without leaking anything."""
@@ -424,7 +515,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     if config.admin_token:
         admin.install(
-            app, config=config, users=users, limiter=limiter, client_key=client_key, report=health_report
+            app, config=config, users=users, values=values, own_names=own_names, own_skills=own_skills,
+            limiter=limiter, client_key=client_key, report=health_report,
         )
 
     return app

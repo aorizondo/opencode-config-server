@@ -141,6 +141,12 @@ curl -fsS "https://cfg.corp/skills/$TOKEN/index.json" | jq
 `config/bootstrap/install.sh` runs once per employee, on login, for things that
 must exist as local binaries. The shipped version installs `hindsight`.
 
+Windows machines run `config/bootstrap/install.ps1` instead (Windows PowerShell
+5.1, `$args[0]` is the server URL), served at `/bootstrap/install.ps1`. The
+admin panel edits both, one tab each; `install.ps1` is checked with PowerShell's
+own parser when `pwsh` is installed on the server. A machine only ever runs the
+one for its platform, so keep the two equivalent.
+
 Three rules, enforced by tests:
 
 - **Idempotent.** It runs again on every fresh login; the version stamp in
@@ -174,6 +180,8 @@ employee's next config refresh fails with a logged warning and they must run
 | The browser does not open | the OpenCode server has no `DISPLAY`/`WAYLAND_DISPLAY` (a headless service); the address is printed, open it by hand |
 | "Bifrost virtual keys are not accepted by this server" | `OCS_BIFROST_URL` is not set |
 | "cannot validate the virtual key right now (Bifrost unavailable)" (`503`) | `OCS_BIFROST_URL` unreachable, or Bifrost answered something other than 200/401/403 |
+| Windows login fails with exit code 9 | `/login.ps1` changed between fetching the manifest and the script (a deploy in between); run the login again |
+| Windows login: "powershell" not found | the machine has no Windows PowerShell 5.1 on `PATH`; it ships with Windows 10/11 |
 | The panel says a file is read-only | `config/` is mounted `:ro`, or not owned by uid 1000 inside the container; use `docker-compose.admin.yml` and `chown` |
 | "changed since it was loaded" when saving in the panel | another admin, or a hand edit, saved the file after you opened it; reload and redo the change |
 | `/admin` answers 404 | `OCS_ADMIN_TOKEN` is not set |

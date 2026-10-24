@@ -238,6 +238,20 @@ def check(document: dict[str, Any]) -> tuple[list[str], list[str]]:
                     p.strings(command, f"{at}.command")
                     if isinstance(command, list) and not command:
                         p.errors.append(f"{at}.command needs at least the program to run")
+                    if isinstance(command, list) and command and all(isinstance(arg, str) for arg in command):
+                        # OpenCode runs command[0] with command[1:] as arguments, no shell
+                        # (packages/core/src/mcp/client.ts), so a joined command line
+                        # is one program name with spaces in it.
+                        if len(command) == 1 and " " in command[0].strip():
+                            p.warnings.append(
+                                f"{at}.command is a single string with spaces: OpenCode runs it as one program "
+                                "name; put the program and each argument in its own list item"
+                            )
+                        if any(arg.startswith("~") for arg in command):
+                            p.warnings.append(
+                                f"{at}.command uses ~, which is not expanded (no shell): use an absolute "
+                                "path, or a variable defined per user such as {env:PROJECTS_DIR}"
+                            )
                     if "environment" in server:
                         p.string_map(server["environment"], f"{at}.environment")
                 elif kind == "remote":
@@ -270,4 +284,21 @@ def check(document: dict[str, Any]) -> tuple[list[str], list[str]]:
                     f"{at} is a relative path: in a remote document it resolves against each "
                     "employee's working directory; use an npm spec or an absolute path"
                 )
+    providers = document.get("providers")
+    if providers is not None and p.type(providers, dict, "providers", "an object keyed by provider id"):
+        for name, provider in providers.items():
+            at = f"providers.{name}"
+            if not p.type(provider, dict, at, "an object"):
+                continue
+            settings = provider.get("settings")
+            if settings is not None and p.type(settings, dict, f"{at}.settings", "an object"):
+                for key in ("apiKey", "authToken", "accessToken", "bearerToken"):
+                    value = settings.get(key)
+                    if isinstance(value, str) and value and "{env:" not in value and "{file:" not in value:
+                        p.warnings.append(
+                            f"{at}.settings.{key} holds a literal key: every employee can read this document; "
+                            "write {env:NAME} and define NAME under Variables"
+                        )
+            if "headers" in provider:
+                p.string_map(provider["headers"], f"{at}.headers")
     return p.errors, p.warnings

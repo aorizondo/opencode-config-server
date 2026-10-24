@@ -9,6 +9,10 @@ the whole company.
 
 ## What is public
 
+Also `/windows/.well-known/opencode` and `/login.ps1`: the Windows manifest and
+the PowerShell login script it downloads. The manifest pins the script's
+SHA-256, so a script that does not match is never run.
+
 `/.well-known/opencode`, `/health`, the sign-in page `/login`, and the start of
 a browser login, `POST /auth/device`.
 
@@ -82,6 +86,19 @@ by default. Revocation is therefore server side and checked on **every** request
 
 Bump `version` to kill one user's tokens; rotate `OCS_SESSION_SECRET` to kill
 everyone's.
+
+### Variables
+
+`config/variables.json` (0600) holds the values the server fills into
+`{env:NAME}` — typically provider API keys — in clear, like `users.json` holds
+password hashes. Each value is sent only to the employee it belongs to, or to
+everyone for shared ones. Secret values are write-only in the panel, history
+versions of the file are restorable but not viewable, and the log names the
+variable, never the value. Values cannot contain `{env:…}` or `{file:…}`.
+An employee's own environment always wins: the login reports which of these
+names they define themselves (names only), and the server leaves those to their
+machine; "machine" variables never overwrite or remove a value the employee set.
+Details in [VARIABLES.md](VARIABLES.md#security).
 
 ### Bifrost virtual keys
 

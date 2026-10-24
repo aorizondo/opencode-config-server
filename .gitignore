@@ -91,3 +91,7 @@ config/opencode.local.jsonc
 
 # Admin panel: previous versions of every saved file (may hold password hashes)
 config/.history/
+# Admin panel: per-user values such as provider keys
+config/variables.json
+# Server runtime state (names each employee defines themselves)
+config/.state/

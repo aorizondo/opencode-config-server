@@ -80,6 +80,32 @@ that must stay current cannot live here.
 Our implementation: `opencode_config_server/login_script.sh`, exercised
 end-to-end in `tests/test_login_e2e.py`.
 
+### Windows
+
+`bash -c` does not exist on a stock Windows machine, and OpenCode does not tell
+the server which OS is asking: the manifest request carries no platform hint.
+But `inspect()` builds the manifest URL as `<origin>/.well-known/opencode`
+(`wellknown.ts:65-66`), and the origin may carry a path. So Windows machines
+run `opencode auth login <server>/windows`, and that manifest's command is
+`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command <launcher>`.
+
+The PowerShell script cannot be inlined like the bash one: Windows command
+lines stop at 32,767 characters. The launcher (under 1 KB, single quotes only,
+so Windows argument quoting has nothing to mangle) downloads `/login.ps1` and
+runs it only if its SHA-256 matches the one written in the manifest; otherwise
+it exits 9 without running anything. The manifest stays the one thing to audit.
+
+`login_script.ps1` targets Windows PowerShell 5.1, which every Windows 10/11
+machine has, and implements the same contract: browser login, credentials from
+the environment or the credentials file, `bootstrap/install.ps1`, the
+employee's own variables winning, machine variables through a detached
+process. Both manifests point at the same `remote_config`: one configuration
+for every platform.
+
+Verified by running it under PowerShell 7 (a container, against a live server):
+password and browser logins, the installer's output kept off stdout, own values
+kept, machine variables applied. Not yet run on Windows PowerShell 5.1 itself.
+
 ## 3. Loading the remote configuration
 
 `packages/core/src/config.ts:145-170`
@@ -117,7 +143,8 @@ Two different merge regimes apply on top of that ordering:
 | --- | --- | --- |
 | `agents.<id>` | per-field, per document, in order (`config/plugin/agent.ts:95-125`) | corporate defaults, local overrides survive field by field; `update()` creates ids that do not exist |
 | `commands.<name>` | `add()` per name (`config/plugin/command.ts:74`) | inline `template`, no files needed |
-| `skills[]` | accumulated; http(s) entries become URL sources (`config/plugin/skill.ts:96-99`) | remote skills |
+| `skills[]` | accumulated; http(s) entries become URL sources (`config/plugin/skill.ts:92-95`) | remote skills; same-named skill: last source loaded wins (see §5) |
+| `instructions[]` | accumulated and deduplicated (`config/plugin/instruction.ts:144-147`) | an employee can add, not remove |
 | `mcp.servers.<name>` | by name, later document wins (`config/plugin/mcp.ts:47-55`) | overridable |
 | `plugins[]` | concatenated across documents (`plugin/skill.ts:72-78`) | `"-<pkg>"` removes one (`config/plugin/source.ts:117-119`) |
 | `permissions[]` | accumulated with `push`, evaluated `findLast` | corporate rules are a floor, not a lock |
@@ -127,6 +154,24 @@ That last row is the one to design around: scalar keys cannot be
 *partially* imposed.
 
 ## 5. Remote skills
+
+Skill sources from every document are added together
+(`config/plugin/skill.ts:80-104`): first the skill folders of each config
+directory (`~/.config/opencode/skill(s)`, `.opencode/skill(s)` in the project),
+then each document's `skills` list in document order, corporate first. A
+skill's identity is its folder name (`skill-file.ts:45-48`), and when two
+sources provide the same one **the one loaded last wins** (`skills.set(id, …)`):
+a corporate URL source therefore replaces an employee's same-named skill from
+their own folders. To keep the employee's, the login command reports the
+corporate skill names they also have in `~/.config/opencode/skill(s)` and the
+server leaves those out of that employee's index. Project-level folders cannot
+be seen at login.
+
+`instructions` work the same way minus the identity: every document's entries
+are added together and deduplicated (`config/plugin/instruction.ts:144-167`);
+relative entries are searched upwards from each session's directory, URLs are
+fetched when the configuration loads (5 s timeout, last good copy kept).
+
 
 `packages/core/src/skill/discovery.ts:92-200`
 

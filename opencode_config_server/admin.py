@@ -27,6 +27,7 @@ import logging
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
@@ -37,7 +38,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from . import configdoc, jsonc, skills, store
+from . import configdoc, jsonc, manifest, skills, store, variables
 from .auth import AuthError, RateLimiter, User, UserStore, generate_api_key, hash_api_key, hash_password
 from .settings import Settings
 
@@ -119,6 +120,16 @@ class ConfigWrite(BaseModel):
 class ConfigDraft(BaseModel):
     text: str | None = None
     document: dict[str, Any] | None = None
+    #: Preview the document as this employee receives it, variables filled in.
+    as_user: str | None = None
+
+
+class VariableWrite(BaseModel):
+    #: None keeps the stored value (e.g. to flip `secret` on an existing one).
+    value: str | None = None
+    secret: bool = False
+    #: Also set it in the environment of OpenCode on the employee's machine.
+    machine: bool = False
 
 
 class NewUser(BaseModel):
@@ -251,11 +262,40 @@ def shell_syntax_error(text: str) -> str | None:
     return result.stderr.replace(f"{bash}: ", "").strip() or "bash -n reported a syntax error"
 
 
+def powershell_syntax_error(text: str) -> str | None:
+    """PowerShell's own parser on install.ps1; None when it parses, or when
+    PowerShell (pwsh) is not installed on this server."""
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        return None
+    with tempfile.NamedTemporaryFile("w", suffix=".ps1", delete=False, encoding="utf-8") as handle:
+        handle.write(text)
+        script = handle.name
+    try:
+        # With -Command, trailing arguments are appended to the command text
+        # rather than passed as $args, so the path goes inside it (mkstemp
+        # paths never contain a quote).
+        result = subprocess.run(
+            [pwsh, "-NoProfile", "-NonInteractive", "-Command",
+             f"$e=$null;$t=$null;[void][System.Management.Automation.Language.Parser]::ParseFile('{script}',[ref]$t,[ref]$e);"
+             "$e | ForEach-Object { 'line {0}: {1}' -f $_.Extent.StartLineNumber, $_.Message }"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return "the PowerShell syntax check timed out"
+    finally:
+        Path(script).unlink(missing_ok=True)
+    return result.stdout.strip() or None
+
+
 def install(
     app: FastAPI,
     *,
     config: Settings,
     users: UserStore,
+    values: variables.VariableStore,
+    own_names: variables.EmployeeNames,
+    own_skills: variables.EmployeeNames,
     limiter: RateLimiter,
     client_key: Callable[[Request], str],
     report: Callable[[], dict[str, Any]],
@@ -349,6 +389,7 @@ def install(
         return {
             "base_url": config.base_url,
             "login_command": f"opencode auth login {config.base_url}",
+            "windows_login_command": f"opencode auth login {config.base_url}{manifest.WINDOWS_PATH}",
             "health": report(),
             "features": {
                 "skills": config.skills_enabled,
@@ -362,6 +403,10 @@ def install(
                 "users": {"path": str(config.users_file), "writable": store.writable(config.users_file)},
                 "skills": {"path": str(config.skills_dir), "writable": store.writable(config.skills_dir / "x")},
                 "bootstrap": {"path": str(config.bootstrap_file), "writable": store.writable(config.bootstrap_file)},
+                "windows_bootstrap": {
+                    "path": str(config.windows_bootstrap_file), "writable": store.writable(config.windows_bootstrap_file),
+                },
+                "variables": {"path": str(config.variables_file), "writable": store.writable(config.variables_file)},
             },
         }
 
@@ -413,8 +458,28 @@ def install(
         except configdoc.ConfigError as error:
             return _invalid(str(error))
         errors, warnings = configdoc.check(document)
+        rendered = configdoc.render(document, config)
+        filled: list[str] = []
+        kept: list[str] = []
+        if body.as_user:
+            own = own_names.get(body.as_user)
+            entries = variables.resolve_entries(values.load(), body.as_user, own=own)
+            kept = sorted(variables.references(rendered) & own)
+            # Secret values never travel back to the browser, not even here.
+            shown = {name: f"<secret {name}>" if entry.get("secret") else entry["value"] for name, entry in entries.items()}
+            filled = sorted(variables.references(rendered) & set(shown))
+            rendered = variables.apply(rendered, shown)
         return JSONResponse(
-            content={"errors": errors, "warnings": warnings, "rendered": configdoc.render(document, config)}
+            content={
+                "errors": errors,
+                "warnings": warnings,
+                "rendered": rendered,
+                "filled": filled,
+                # Defined in that employee's own environment: theirs is used.
+                "kept": kept,
+                # Left for each employee's machine to resolve from its environment.
+                "unresolved": sorted(variables.references(rendered) - {config.session_env}),
+            }
         )
 
     @api.put("/config")
@@ -581,6 +646,12 @@ def install(
             entries.remove(find(entries, name))
 
         change_users(request, f"deleted user {name}", remove)
+        # Their variables (provider keys, typically) go with the account.
+        own_names.forget(name)
+        own_skills.forget(name)
+        document = values.reload()
+        if name in document.get("users", {}) and store.writable(config.variables_file):
+            change_variables(request, f"dropped the variables of deleted user {name}", lambda doc: doc["users"].pop(name, None))
         return {"status": "deleted"}
 
     @api.post("/users/{name}/api-keys")
@@ -627,6 +698,120 @@ def install(
 
         return {"user": change_users(request, f"revoked every session of {name}", bump)}
 
+    # -- variables ------------------------------------------------------------
+
+    def variable_rows(scope: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": name,
+                "secret": bool(entry.get("secret")),
+                "machine": bool(entry.get("machine")),
+                "value": None if entry.get("secret") else entry["value"],
+            }
+            for name, entry in sorted(scope.items())
+        ]
+
+    def change_variables(request: Request, action: str, change: Callable[[dict[str, Any]], Any]) -> Any:
+        if not store.writable(config.variables_file):
+            raise _not_writable(config.variables_file)
+        outcome: dict[str, Any] = {}
+
+        def transform(data: bytes | None) -> bytes:
+            try:
+                document = variables.parse(data)
+            except variables.VariableError as error:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"{error}; fix it by hand first") from error
+            outcome["value"] = change(document)
+            return (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+        files.modify("variables", config.variables_file, transform, mode=0o600)
+        values.reload()
+        audit(request, action)
+        return outcome.get("value")
+
+    def known_users() -> list[str]:
+        try:
+            entries = users_document(store.read(config.users_file))["users"]
+        except HTTPException:
+            return []
+        return sorted(entry["name"] for entry in entries if isinstance(entry, dict) and isinstance(entry.get("name"), str))
+
+    def checked(name: str, value: str | None) -> None:
+        try:
+            variables.check_name(name, reserved=config.session_env)
+            if value is not None:
+                variables.check_value(value)
+        except variables.VariableError as error:
+            raise HTTPException(status_code=UNPROCESSABLE, detail=str(error)) from error
+
+    def put(scope: dict[str, Any], name: str, body: VariableWrite) -> dict[str, Any]:
+        existing = scope.get(name)
+        if body.value is None and existing is None:
+            raise HTTPException(status_code=UNPROCESSABLE, detail="enter a value")
+        scope[name] = {
+            "value": existing["value"] if body.value is None else body.value,
+            "secret": body.secret,
+            "machine": body.machine,
+        }
+        return {"name": name, "secret": body.secret, "machine": body.machine}
+
+    @api.get("/variables")
+    async def list_variables() -> dict[str, Any]:
+        state: dict[str, Any] = {
+            "file": config.variables_file.name,
+            "writable": store.writable(config.variables_file),
+            "reserved": config.session_env,
+            "error": None,
+            "global": [],
+            "users": {},
+            "known_users": known_users(),
+            # Names each employee defines themselves (reported at their login).
+            "own": own_names.all(),
+        }
+        try:
+            document = variables.parse(store.read(config.variables_file))
+        except variables.VariableError as error:
+            state["error"] = str(error)
+            return state
+        state["global"] = variable_rows(document["global"])
+        state["users"] = {name: variable_rows(scope) for name, scope in sorted(document["users"].items())}
+        return state
+
+    @api.put("/variables/global/{name}")
+    async def put_global_variable(request: Request, name: str, body: VariableWrite) -> dict[str, Any]:
+        checked(name, body.value)
+        # The value never reaches the log, only its name.
+        return change_variables(request, f"set global variable {name}", lambda doc: put(doc["global"], name, body))
+
+    @api.put("/variables/users/{user}/{name}")
+    async def put_user_variable(request: Request, user: str, name: str, body: VariableWrite) -> dict[str, Any]:
+        checked(name, body.value)
+        if user not in known_users():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"no user named {user!r}")
+        return change_variables(
+            request, f"set variable {name} for {user}", lambda doc: put(doc["users"].setdefault(user, {}), name, body)
+        )
+
+    def drop(scope: dict[str, Any] | None, name: str) -> None:
+        if not scope or name not in scope:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"no variable named {name!r}")
+        del scope[name]
+
+    @api.delete("/variables/global/{name}")
+    async def delete_global_variable(request: Request, name: str) -> dict[str, str]:
+        change_variables(request, f"deleted global variable {name}", lambda doc: drop(doc["global"], name))
+        return {"status": "deleted"}
+
+    @api.delete("/variables/users/{user}/{name}")
+    async def delete_user_variable(request: Request, user: str, name: str) -> dict[str, str]:
+        def remove(document: dict[str, Any]) -> None:
+            drop(document["users"].get(user), name)
+            if not document["users"][user]:
+                del document["users"][user]
+
+        change_variables(request, f"deleted variable {name} for {user}", remove)
+        return {"status": "deleted"}
+
     # -- skills ---------------------------------------------------------------
 
     def skill_dir(name: str) -> Path:
@@ -669,6 +854,11 @@ def install(
     async def list_skills() -> dict[str, Any]:
         root = config.skills_dir
         published = {skill.name: skill for skill in skills.discover(root)}
+        # Who keeps their own version of each skill (reported at their login).
+        kept_by: dict[str, list[str]] = {}
+        for subject, names in own_skills.all().items():
+            for skill_name in names:
+                kept_by.setdefault(skill_name, []).append(subject)
         entries = []
         if root.is_dir():
             for directory in sorted(root.iterdir()):
@@ -694,6 +884,7 @@ def install(
                         "version": skill.version if skill else None,
                         "files": items,
                         "warnings": skill_warnings(directory),
+                        "kept_by": sorted(kept_by.get(directory.name, [])),
                     }
                 )
         return {
@@ -787,36 +978,49 @@ def install(
 
     # -- bootstrap installer --------------------------------------------------
 
-    def bootstrap_state() -> dict[str, Any]:
-        path = config.bootstrap_file
+    def installer(platform: str) -> tuple[str, Path]:
+        """(history key, file) of the installer for one platform."""
+        if platform == "windows":
+            return "bootstrap-windows", config.windows_bootstrap_file
+        if platform in ("", "unix"):
+            return "bootstrap", config.bootstrap_file
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"unknown platform {platform!r}")
+
+    def bootstrap_state(platform: str) -> dict[str, Any]:
+        _, path = installer(platform)
         data = store.read(path)
         return {
-            "file": "bootstrap/install.sh",
+            "platform": platform or "unix",
+            "file": f"bootstrap/{path.name}",
             "text": data.decode("utf-8", errors="replace") if data is not None else "",
             "etag": store.etag(data),
             "exists": data is not None,
             "writable": store.writable(path),
             "enabled": config.bootstrap_enabled,
+            # install.sh is always checked with bash -n; install.ps1 only when
+            # PowerShell (pwsh) is installed on this server.
+            "checked": platform != "windows" or shutil.which("pwsh") is not None,
         }
 
     @api.get("/bootstrap")
-    async def get_bootstrap() -> dict[str, Any]:
-        return bootstrap_state()
+    async def get_bootstrap(platform: str = "") -> dict[str, Any]:
+        return bootstrap_state(platform)
 
     @api.put("/bootstrap")
-    async def put_bootstrap(request: Request, body: FileWrite) -> Any:
-        path = config.bootstrap_file
+    async def put_bootstrap(request: Request, body: FileWrite, platform: str = "") -> Any:
+        key, path = installer(platform)
         if not store.writable(path):
             raise _not_writable(path)
-        error = await run_in_threadpool(shell_syntax_error, body.text)
+        check = powershell_syntax_error if key == "bootstrap-windows" else shell_syntax_error
+        error = await run_in_threadpool(check, body.text)
         if error:
             return _invalid("the installer does not parse; nothing was saved", error.splitlines())
         try:
-            files.write("bootstrap", path, body.text.encode("utf-8"), expected=body.etag, mode=0o755)
+            files.write(key, path, body.text.encode("utf-8"), expected=body.etag, mode=0o755)
         except store.Conflict as conflict:
             raise _conflict(conflict) from conflict
-        audit(request, "saved bootstrap/install.sh")
-        return bootstrap_state()
+        audit(request, f"saved bootstrap/{path.name}")
+        return bootstrap_state(platform)
 
     # -- history --------------------------------------------------------------
 
@@ -826,9 +1030,14 @@ def install(
             return config.opencode_config_file, True
         if doc == "bootstrap":
             return config.bootstrap_file, True
+        if doc == "bootstrap-windows":
+            return config.windows_bootstrap_file, True
         if doc == "users":
             # Old versions hold password hashes: restorable, never displayed.
             return config.users_file, False
+        if doc == "variables":
+            # Same for secret values.
+            return config.variables_file, False
         if doc.startswith("skill:"):
             name, _, relative = doc[len("skill:"):].partition("/")
             return skill_file(name, relative), True
@@ -878,17 +1087,25 @@ def install(
                     User.parse(entry)
             except (AuthError, HTTPException) as error:
                 return _invalid("that version is not a valid users.json", [str(getattr(error, "detail", error))])
-        elif doc == "bootstrap":
-            error = await run_in_threadpool(shell_syntax_error, text)
+        elif doc == "variables":
+            try:
+                variables.parse(data)
+            except variables.VariableError as error:
+                return _invalid("that version is not a valid variables.json", [str(error)])
+        elif doc in ("bootstrap", "bootstrap-windows"):
+            check = powershell_syntax_error if doc == "bootstrap-windows" else shell_syntax_error
+            error = await run_in_threadpool(check, text)
             if error:
                 return _invalid("that version does not parse and was not restored", error.splitlines())
-        mode = 0o600 if doc == "users" else 0o755 if doc == "bootstrap" else 0o644
+        mode = 0o600 if doc in ("users", "variables") else 0o755 if doc.startswith("bootstrap") else 0o644
         try:
             files.write(doc, path, data, expected=body.etag, mode=mode)
         except store.Conflict as error:
             raise _conflict(error) from error
         if doc == "users":
             users.reload(force=True)
+        if doc == "variables":
+            values.reload()
         audit(request, f"restored {doc} to {snapshot_id}")
         return {"status": "restored", "etag": store.etag(data)}
 

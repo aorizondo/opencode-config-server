@@ -79,12 +79,27 @@ class Settings:
         return jsonc if jsonc.exists() else self.config_dir / "opencode.json"
 
     @property
+    def variables_file(self) -> Path:
+        """Global and per-user values for `{env:NAME}` (see variables.py)."""
+        return self.config_dir / "variables.json"
+
+    @property
+    def state_dir(self) -> Path:
+        """Runtime state the server writes itself (never edited by IT)."""
+        return self.config_dir / ".state"
+
+    @property
     def skills_dir(self) -> Path:
         return self.config_dir / "skills"
 
     @property
     def bootstrap_file(self) -> Path:
         return self.config_dir / "bootstrap" / "install.sh"
+
+    @property
+    def windows_bootstrap_file(self) -> Path:
+        """The Windows counterpart of install.sh, run by login_script.ps1."""
+        return self.config_dir / "bootstrap" / "install.ps1"
 
 
 def load(**overrides: object) -> Settings:

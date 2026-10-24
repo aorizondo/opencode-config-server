@@ -58,6 +58,52 @@
     [list[index], list[target]] = [list[target], list[index]];
   }
 
+  /**
+   * Split a command line the way a POSIX shell splits words: whitespace
+   * separates, '…' is literal, "…" allows \" and \\, and outside quotes a
+   * backslash escapes a space, a quote or another backslash -- so C:\tools\x.exe
+   * stays intact. No expansion of any kind: OpenCode runs MCP commands without
+   * a shell.
+   */
+  function splitCommand(line) {
+    const args = [];
+    let current = "";
+    let started = false;
+    let quote = null;
+    for (let index = 0; index < line.length; index++) {
+      const char = line[index];
+      if (quote === "'") {
+        if (char === "'") quote = null;
+        else current += char;
+      } else if (quote === '"') {
+        if (char === '"') quote = null;
+        else if (char === "\\" && (line[index + 1] === '"' || line[index + 1] === "\\")) current += line[++index];
+        else current += char;
+      } else if (char === "'" || char === '"') {
+        quote = char;
+        started = true;
+      } else if (char === "\\" && /[\s"'\\]/.test(line[index + 1] || "")) {
+        current += line[++index];
+        started = true;
+      } else if (/\s/.test(char)) {
+        if (started) args.push(current);
+        current = "";
+        started = false;
+      } else {
+        current += char;
+        started = true;
+      }
+    }
+    if (quote) return { args, error: `Missing closing ${quote === '"' ? "double" : "single"} quote.` };
+    if (started) args.push(current);
+    return { args, error: null };
+  }
+
+  /** The inverse of splitCommand, quoting only what needs it. */
+  function joinCommand(args) {
+    return args.map((arg) => (arg === "" || /[\s"'\\]/.test(arg) ? `"${arg.replace(/(["\\])/g, "\\$1")}"` : arg)).join(" ");
+  }
+
   function formatBytes(size) {
     if (size < 1024) return `${size} B`;
     if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
@@ -461,6 +507,7 @@
     ["overview", "Overview", "#/"],
     ["config", "Configuration", "#/config/general"],
     ["users", "Users", "#/users"],
+    ["variables", "Variables", "#/variables"],
     ["skills", "Skills", "#/skills"],
     ["installer", "Installer", "#/installer"],
   ];
@@ -577,7 +624,9 @@
       ["Configuration", overview.files.config],
       ["Users", overview.files.users],
       ["Skills", overview.files.skills],
-      ["Installer", overview.files.bootstrap],
+      ["Installer (macOS & Linux)", overview.files.bootstrap],
+      ["Installer (Windows)", overview.files.windows_bootstrap],
+      ["Variables", overview.files.variables],
     ];
     put(main, 
       pageHead("Overview", "What this server hands to every employee's OpenCode, and whether it is healthy."),
@@ -591,7 +640,10 @@
         h("section", { class: "card" },
           h("h2", { text: "Connect a machine" }),
           h("p", { text: "Employees run this once and sign in from the browser that opens:" }),
+          h("span", { class: "label", text: "macOS & Linux" }),
           copyBlock(overview.login_command),
+          h("span", { class: "label os-label", text: "Windows" }),
+          copyBlock(overview.windows_login_command),
           h("p", { class: "hint", text: "OpenCode then fetches the configuration at start-up and every 10 minutes." }))),
       h("div", { class: "grid four" },
         h("a", { class: "card stat", href: "#/users" }, h("span", { text: "Users" }), h("strong", { text: String(health.users) })),
@@ -656,7 +708,9 @@
       type: "button", class: "btn", text: "History",
       onclick: () => openHistory("config", { title: cfg.file, etag: cfg.etag, onRestored: reload }).catch(fail),
     });
-    const head = pageHead("Configuration", null, historyButton);
+    const head = pageHead("Configuration", null,
+      h("button", { type: "button", class: "btn", text: "Preview", onclick: () => check() }),
+      historyButton);
     const subtitle = h("p");
     head.firstChild.append(subtitle);
     put(main, head, problems, tabs, body, saveBar);
@@ -688,28 +742,48 @@
     }
 
     function payload() {
-      return dirty === "text" ? { text: textDraft } : { document: tidy(clone(draft)) };
+      if (dirty === "text") return { text: textDraft };
+      if (dirty === "forms") return { document: tidy(clone(draft)) };
+      return { text: cfg.text };
     }
 
+    /** What one employee receives: the draft (or the saved file), variables filled in. */
     async function check() {
+      let names = [];
       try {
-        const result = await api("POST", "/config/check", payload());
-        feedback = { kind: result.errors.length ? "error" : "info", title: result.errors.length ? "This draft would be rejected" : "This draft is valid", errors: result.errors, warnings: result.warnings };
-        renderProblems();
-        modal({
-          title: "What employees receive",
-          wide: true,
-          body: [
-            h("p", { class: "hint", text: "The draft as served by GET /config/opencode.json: {server_url} and {session_token} are filled in; {env:…} and {file:…} stay for each employee's machine to resolve." }),
-            h("pre", { class: "preview", text: JSON.stringify(result.rendered, null, 2) }),
-          ],
-        });
+        names = (await api("GET", "/users")).users.map((user) => user.name);
       } catch (error) {
-        if (error.status === 422) {
-          feedback = { kind: "error", title: error.message, errors: error.data.errors || [], warnings: [] };
-          renderProblems();
-        } else fail(error);
+        if (error.status === 401) return;
       }
+      let asUser = "";
+      const output = h("div");
+      const run = async () => {
+        try {
+          const result = await api("POST", "/config/check", { ...payload(), as_user: asUser || null });
+          if (dirty) {
+            feedback = { kind: result.errors.length ? "error" : "info", title: result.errors.length ? "This draft would be rejected" : "This draft is valid", errors: result.errors, warnings: result.warnings };
+            renderProblems();
+          }
+          put(output,
+            asUser && result.filled.length ? h("p", { class: "hint", text: `Filled in by this server for ${asUser}: ${result.filled.join(", ")}. Secret values are masked here.` }) : null,
+            asUser && result.kept.length ? h("p", { class: "hint", text: `${asUser} defines these themselves, so their own values are used: ${result.kept.join(", ")}.` }) : null,
+            result.unresolved.length ? h("p", { class: "hint", text: `Left for each employee's machine to resolve: ${result.unresolved.map((name) => `{env:${name}}`).join(", ")}. Missing ones become empty.` }) : null,
+            h("pre", { class: "preview", text: JSON.stringify(result.rendered, null, 2) }));
+        } catch (error) {
+          if (error.status === 422) put(output, banner("error", error.message, error.data.errors || []));
+          else fail(error);
+        }
+      };
+      modal({
+        title: "What employees receive",
+        wide: true,
+        body: [
+          field("Preview as", select([["", "Anyone (no per-user variables)"], ...names.map((name) => [name, name])], "", (value) => { asUser = value; run(); }),
+            `${dirty ? "Your unsaved draft" : cfg.file} as served by GET /config/opencode.json.`),
+          output,
+        ],
+      });
+      await run();
     }
 
     async function save() {
@@ -970,6 +1044,43 @@
       ];
     }
 
+    /** The MCP command typed as in a terminal, stored as OpenCode's argument list. */
+    function commandField(server) {
+      const preview = h("div", { class: "argv", "aria-live": "polite" });
+      const show = (args, error) => put(preview,
+        error
+          ? h("span", { class: "form-error", text: error })
+          : args.length
+            ? [h("span", { class: "muted", text: "Runs:" }), args.map((arg) => h("code", { text: arg }))]
+            : h("span", { class: "muted", text: "Program first, then its arguments." }));
+      const input = textInput(joinCommand(server.command || []), (value) => {
+        const { args, error } = splitCommand(value);
+        show(args, error);
+        if (error) {
+          input.setAttribute("aria-invalid", "true");
+          return;
+        }
+        input.removeAttribute("aria-invalid");
+        server.command = args;
+        changed();
+      }, { class: "mono", placeholder: "npx -y @modelcontextprotocol/server-filesystem /srv/projects", "aria-label": "Command" });
+      show(server.command || [], null);
+      return h("div", { class: "field" },
+        h("label", { for: input.id || (input.id = uid()), text: "Command" }),
+        input,
+        preview,
+        h("p", { class: "hint", text: "Type it as you would in a terminal; quote arguments with spaces (\"My Projects\"). Each box under the field is one argument. It is not run through a shell, so ~, $VAR, %VAR%, pipes and && do nothing. The same command runs on every employee's machine, Windows included: prefer npx, uvx or docker, and for paths that differ between machines use a variable defined per user, e.g. {env:PROJECTS_DIR}." }),
+        h("details", { class: "examples" },
+          h("summary", { text: "Examples" }),
+          h("ul", {}, [
+            "npx -y @modelcontextprotocol/server-filesystem {env:PROJECTS_DIR}",
+            "uvx mcp-server-git --repository {env:PROJECTS_DIR}",
+            "docker run -i --rm mcp/fetch",
+            "node /opt/corp/mcp/server.js --port 0",
+          ].map((example) => h("li", {}, h("code", { text: example }),
+            h("button", { type: "button", class: "btn small ghost", text: "Use", onclick: () => { input.value = example; input.dispatchEvent(new Event("input")); input.focus(); } }))))));
+    }
+
     function mcp() {
       const ensure = (create) => {
         if (create && !draft.mcp) draft.mcp = {};
@@ -1009,8 +1120,7 @@
             });
             const specific = server.type === "local"
               ? [
-                field("Command", codeArea((server.command || []).join("\n"), (value) => { server.command = value.split("\n").map((part) => part.trim()).filter(Boolean); changed(); }, { rows: 4, label: "Command" }),
-                  "One argument per line, program first: npx, -y, @scope/server…"),
+                commandField(server),
                 field("Working directory", textInput(server.cwd, (value) => { assign(server, "cwd", value.trim()); changed(); }, { placeholder: "workspace directory" })),
                 h("h4", { text: "Environment" }),
                 keyValues(server, "environment", { keyPlaceholder: "NAME", valuePlaceholder: "value or {env:NAME}", onChange: changed }),
@@ -1273,6 +1383,10 @@
                 })),
               h("p", { class: "hint", text: existingKeyHint() }))),
           h("section", {},
+            h("h3", { text: "Variables" }),
+            h("p", { class: "hint", text: "Values filled into {env:NAME} for this user only — their own provider keys, for instance." }),
+            h("a", { class: "btn small", href: `#/variables/${enc(user.name)}`, text: "Edit this user's variables", onclick: () => dialog.close() })),
+          h("section", {},
             h("h3", { text: "Sessions" }),
             h("p", { class: "hint", text: "Ends every OpenCode session of this user on every machine at once; they must run opencode auth login again." }),
             h("button", {
@@ -1498,6 +1612,11 @@
           h("span", { class: skill.published ? "chip ok" : "chip warn", text: skill.published ? `published · ${skill.version}` : "not published" }),
           h("button", { type: "button", class: "btn small danger", text: "Delete skill", disabled: !data.writable, onclick: deleteSkill })),
         skill.warnings.length ? banner("warn", null, skill.warnings) : null,
+        skill.kept_by.length
+          ? banner("info", `${skill.kept_by.length} employee${skill.kept_by.length > 1 ? "s use their" : " uses their"} own version`, [
+            `${skill.kept_by.join(", ")} — they have a skill with this name in their own skills folder (reported at their last login), so they do not receive this one.`,
+          ])
+          : null,
         h("div", { class: "files" },
           skill.files.map((item) => h("button", {
             type: "button",
@@ -1541,24 +1660,43 @@
 
   // -- installer --------------------------------------------------------------------
 
-  const INSTALLER_TEMPLATE = "#!/usr/bin/env bash\n# Runs once on each employee's machine, during `opencode auth login`.\n# Install what cannot live in opencode.json: TUI plugins, companion tools\n# such as Hindsight, environment files.\nset -euo pipefail\n\n";
+  const INSTALLERS = {
+    unix: {
+      label: "macOS & Linux",
+      template: "#!/usr/bin/env bash\n# Runs once on each employee's macOS or Linux machine, during `opencode auth login`.\n# Install what cannot live in opencode.json: TUI plugins, companion tools\n# such as Hindsight, environment files. $1 is the server URL.\nset -euo pipefail\n\n",
+      check: "Checked with bash -n before saving.",
+    },
+    windows: {
+      label: "Windows",
+      template: "# Runs once on each employee's Windows machine, during `opencode auth login`.\n# Windows PowerShell 5.1. Install what cannot live in opencode.json: TUI plugins,\n# companion tools such as Hindsight, environment files. $args[0] is the server URL.\n$ErrorActionPreference = 'Stop'\n\n",
+      check: "Checked with PowerShell's own parser before saving.",
+    },
+  };
 
-  async function installerPage() {
-    let state = await api("GET", "/bootstrap");
-    let draft = state.exists ? state.text : INSTALLER_TEMPLATE;
-    // A brand-new installer starts from the template: only typing makes it dirty.
-    let baseline = draft;
+  async function installerPage(sub) {
+    let platform = sub[0] === "windows" ? "windows" : "unix";
+    let state;
+    let draft;
+    let baseline;
     let errors = [];
     const dirty = () => draft !== baseline;
     const savable = () => state.writable && (dirty() || !state.exists);
+    const tabs = h("nav", { class: "tabs", "aria-label": "Platform" });
     const view = h("div");
+
+    async function load() {
+      state = await api("GET", `/bootstrap?platform=${platform}`);
+      draft = baseline = state.exists ? state.text : INSTALLERS[platform].template;
+      errors = [];
+      render();
+    }
 
     async function save() {
       try {
-        state = await api("PUT", "/bootstrap", { text: draft, etag: state.etag });
+        state = await api("PUT", `/bootstrap?platform=${platform}`, { text: draft, etag: state.etag });
         draft = baseline = state.text;
         errors = [];
-        toast("Installer saved. It runs on the next opencode auth login of each employee.");
+        toast(`${state.file} saved. It runs on the next opencode auth login of each ${INSTALLERS[platform].label} machine.`);
         render();
       } catch (error) {
         if (error.status === 422) {
@@ -1569,28 +1707,189 @@
     }
 
     function render() {
+      put(tabs, Object.entries(INSTALLERS).map(([id, info]) => h("a", {
+        href: `#/installer/${id === "windows" ? "windows" : ""}`, class: id === platform ? "active" : null,
+        "aria-current": id === platform ? "page" : null, text: info.label,
+      })));
       const saveButton = h("button", { type: "button", class: "btn primary", text: state.exists ? "Save" : "Create installer", disabled: !savable(), onclick: save });
       const area = codeArea(draft, (value) => { draft = value; saveButton.disabled = !savable(); }, { rows: 28, onSave: () => savable() && save(), label: state.file });
-      put(view, 
+      put(view,
         state.enabled ? null : banner("warn", "The installer is switched off", ["OCS_BOOTSTRAP_ENABLED=false: employees do not receive it."]),
         state.writable ? null : readOnlyBanner("The installer", state.file),
-        errors.length ? banner("error", "bash cannot parse the script; nothing was saved", errors) : null,
-        h("p", { class: "hint", text: "Checked with bash -n before saving. It runs with the employee's permissions, as part of the login, and only then — not on every refresh." }),
+        errors.length ? banner("error", "The script does not parse; nothing was saved", errors) : null,
+        h("p", { class: "hint", text: `${state.file}. ${state.checked ? INSTALLERS[platform].check : "Not checked before saving: PowerShell (pwsh) is not installed on this server."} It runs with the employee's permissions, as part of the login, and only then — not on every refresh.` }),
         area,
         h("div", { class: "editor-actions" },
           saveButton,
-          state.exists ? h("button", { type: "button", class: "btn", text: "History", onclick: () => openHistory("bootstrap", { title: state.file, etag: state.etag, onRestored: async () => { state = await api("GET", "/bootstrap"); draft = baseline = state.text; render(); } }).catch(fail) }) : null));
+          state.exists ? h("button", {
+            type: "button", class: "btn", text: "History",
+            onclick: () => openHistory(platform === "windows" ? "bootstrap-windows" : "bootstrap", { title: state.file, etag: state.etag, onRestored: load }).catch(fail),
+          }) : null));
     }
 
-    put(main, 
-      pageHead("Installer", "bootstrap/install.sh: the place for everything that is not an opencode.json setting."),
-      view,
-    );
-    render();
-    return { dirty };
+    put(main,
+      pageHead("Installer", "What every machine runs once at login: everything that is not an opencode.json setting. One script per platform."),
+      tabs,
+      view);
+    await load();
+    return {
+      dirty,
+      navigate: async (next) => {
+        const wanted = next[0] === "windows" ? "windows" : "unix";
+        if (wanted === platform) return;
+        if (dirty() && !window.confirm("You have unsaved changes. Switch without saving?")) {
+          history.replaceState(null, "", `#/installer/${platform === "windows" ? "windows" : ""}`);
+          return;
+        }
+        platform = wanted;
+        await load();
+      },
+    };
   }
 
-  const PAGES = { overview: overviewPage, config: configPage, users: usersPage, skills: skillsPage, installer: installerPage };
+  // -- variables ------------------------------------------------------------------
+
+  async function variablesPage(sub) {
+    let data = await api("GET", "/variables");
+    let selected = sub[0] && data.known_users.includes(sub[0]) ? sub[0] : data.known_users[0] || "";
+
+    const reload = async () => {
+      data = await api("GET", "/variables");
+      render();
+    };
+
+    /** Add or edit one variable; `path` is "global" or "users/<name>". */
+    const editVariable = (path, label, existing) => {
+      const name = h("input", { type: "text", spellcheck: "false", autocomplete: "off", value: existing ? existing.name : "", readOnly: Boolean(existing), placeholder: "OPENAI_API_KEY" });
+      let secret = existing ? existing.secret : true;
+      let machine = existing ? existing.machine : false;
+      const value = h("input", {
+        type: secret ? "password" : "text", spellcheck: "false", autocomplete: "off",
+        value: existing && !existing.secret ? existing.value : "",
+        placeholder: existing && existing.secret ? "leave empty to keep the current value" : "",
+      });
+      const error = h("p", { class: "form-error", role: "alert", hidden: true });
+      modal({
+        title: existing ? `Edit ${existing.name}` : `New variable — ${label}`,
+        body: [
+          field("Name", name, "Referenced in the configuration as {env:NAME}. Letters, digits and _."),
+          field("Value", value),
+          h("div", { class: "checks" }, checkbox("Secret — never shown again after saving", secret, (checkedValue) => { secret = checkedValue; value.type = checkedValue ? "password" : "text"; })),
+          h("div", { class: "checks" }, checkbox("Also set it in the environment of OpenCode on the machine", machine, (checkedValue) => { machine = checkedValue; })),
+          h("p", { class: "hint", text: "For plugins, local MCP servers and shell commands, which read real environment variables. Applied by the next opencode auth login on each machine, which restarts OpenCode there; never over a value the employee set themselves. Not needed for {env:NAME} in the configuration." }),
+          error,
+        ],
+        actions: [
+          { label: "Cancel", kind: "ghost" },
+          {
+            label: "Save", kind: "primary",
+            onClick: async () => {
+              try {
+                const keep = existing && existing.secret && value.value === "";
+                await api("PUT", `/variables/${path}/${enc(name.value.trim())}`, { value: keep ? null : value.value, secret, machine });
+                toast(`Saved ${name.value.trim()}. Employees get it on their next refresh (within 10 minutes).`);
+                await reload();
+                return false;
+              } catch (problem) {
+                error.textContent = problem.message;
+                error.hidden = false;
+                return true;
+              }
+            },
+          },
+        ],
+      });
+      (existing ? value : name).focus();
+    };
+
+    const remove = async (path, row) => {
+      if (!(await confirmBox(`Delete ${row.name}?`, `{env:${row.name}} will no longer be filled in by this server; each machine resolves it from its own environment, or leaves it empty.`, { confirm: "Delete", danger: true }))) return;
+      try {
+        await api("DELETE", `/variables/${path}/${enc(row.name)}`);
+        toast(`Deleted ${row.name}.`);
+        await reload();
+      } catch (error) {
+        fail(error);
+      }
+    };
+
+    const table = (rows, path, label, empty) => h("div", {},
+      rows.length
+        ? h("table", { class: "list" },
+          h("thead", {}, h("tr", {}, h("th", { text: "Name" }), h("th", { text: "Value" }), h("th", {}))),
+          h("tbody", {}, rows.map((row) => h("tr", {},
+            h("td", {}, h("code", { text: `{env:${row.name}}` })),
+            h("td", {},
+              h("span", { class: row.secret ? "muted" : "path", text: row.secret ? "•••••••• secret" : row.value }),
+              row.machine ? h("span", { class: "chip", title: "Also set in the environment of OpenCode on each machine at login", text: "machine env" }) : null),
+            h("td", { class: "actions" },
+              h("button", { type: "button", class: "btn small ghost", text: "Edit", disabled: !data.writable, onclick: () => editVariable(path, label, row) }),
+              h("button", { type: "button", class: "btn small danger", text: "Delete", disabled: !data.writable, onclick: () => remove(path, row) }))))))
+        : h("p", { class: "muted", text: empty }),
+      h("div", { class: "editor-actions" },
+        h("button", { type: "button", class: "btn small", text: "+ Add variable", disabled: !data.writable, onclick: () => editVariable(path, label, null) })));
+
+    function render() {
+      const overrides = Object.keys(data.users);
+      const userRows = (selected && data.users[selected]) || [];
+      const globalNames = new Set(data.global.map((row) => row.name));
+      put(main,
+        pageHead("Variables", "Values this server fills into {env:NAME} in the configuration, per employee — so a provider key never has to be written in the file.",
+          h("button", { type: "button", class: "btn", text: "History", onclick: () => openHistory("variables", { title: data.file, onRestored: reload }).catch(fail) })),
+        data.writable ? null : readOnlyBanner("The variables file", data.file),
+        data.error ? banner("error", "variables.json has a problem", [data.error, "Employees keep receiving the last good values. Fix the file by hand, or restore a version from History."]) : null,
+        h("section", { class: "card" },
+          h("h2", { text: "How it works" }),
+          h("p", { text: "Write {env:NAME} anywhere in the configuration, e.g. \"apiKey\": \"{env:OPENAI_API_KEY}\" in a provider's settings. When an employee's OpenCode fetches the configuration, this server replaces it with that employee's value, or the value for everyone. A name defined in neither place is left alone, and OpenCode resolves it from the environment on the employee's machine." }),
+          h("p", { text: "The employee's own values always win: if they already define a variable on their machine (checked at each login), theirs is used and the company's is not applied — neither in the configuration nor in their machine environment." }),
+          h("table", { class: "list" },
+            h("tbody", {},
+              [
+                ["{server_url}", "This server's public address."],
+                ["{session_token}", "The employee's session token for this server (only useful to reach this server)."],
+                ["{env:NAME}", "A variable defined on this page, else the environment variable NAME on the employee's machine, else empty."],
+                ["{file:~/path}", "The contents of a file on the employee's machine (absolute or ~/ paths), else empty."],
+              ].map(([token, meaning]) => h("tr", {}, h("td", {}, h("code", { text: token })), h("td", { text: meaning }))))),
+          h("p", { class: "hint", text: `${data.reserved} is reserved: OpenCode fills it with the session token. Use Preview on the Configuration page to see what a given employee receives.` })),
+        h("section", { class: "card" },
+          h("h2", { text: "Everyone" }),
+          h("p", { class: "hint", text: "Shared values, such as a gateway URL. A user's own variable with the same name wins." }),
+          table(data.global, "global", "everyone", "No variables for everyone yet.")),
+        h("section", { class: "card" },
+          h("h2", { text: "Per user" }),
+          data.known_users.length
+            ? [
+              field("User", select(data.known_users.map((name) => [name, `${name}${overrides.includes(name) ? ` (${data.users[name].length})` : ""}`]), selected, (value) => {
+                selected = value;
+                history.replaceState(null, "", `#/variables/${enc(value)}`);
+                render();
+              })),
+              userRows.some((row) => globalNames.has(row.name))
+                ? h("p", { class: "hint", text: "Values here replace the ones for everyone with the same name." })
+                : null,
+              (data.own[selected] || []).length
+                ? banner("info", `${selected} defines these themselves`, [
+                  `${data.own[selected].join(", ")} — reported at their last login. Their own values are used, not the company's.`,
+                ])
+                : null,
+              table(userRows, `users/${enc(selected)}`, selected, `No variables for ${selected} yet.`),
+            ]
+            : h("p", { class: "muted", text: "Add users first; then give each one their own values here." })),
+      );
+    }
+
+    render();
+    return {
+      navigate: (next) => {
+        if (next[0] && data.known_users.includes(next[0])) {
+          selected = next[0];
+          render();
+        }
+      },
+    };
+  }
+
+  const PAGES = { overview: overviewPage, config: configPage, users: usersPage, variables: variablesPage, skills: skillsPage, installer: installerPage };
 
   // -- start ---------------------------------------------------------------------------
 

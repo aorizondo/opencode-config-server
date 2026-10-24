@@ -61,7 +61,7 @@ where = ["."]
 include = ["opencode_config_server*"]
 
 [tool.setuptools.package-data]
-opencode_config_server = ["login_script.sh", "login.html", "panel/*"]
+opencode_config_server = ["login_script.sh", "login_script.ps1", "login.html", "panel/*"]
 
 [tool.ruff]
 target-version = "py311"

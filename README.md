@@ -43,8 +43,12 @@ curl -fsS http://localhost:8000/health
 Now connect a machine that has OpenCode v2:
 
 ```bash
-opencode auth login http://localhost:8000
+opencode auth login http://localhost:8000           # macOS, Linux
+opencode auth login http://localhost:8000/windows   # Windows
 ```
+
+Windows has no bash, so its address serves a manifest whose login runs in
+Windows PowerShell 5.1 instead; everything else is identical.
 
 OpenCode prints a sign-in address and a code, and opens the browser when it can.
 The employee signs in there — username and password, a corporate API key, or a
@@ -114,6 +118,7 @@ docker compose -f docker-compose.yml -f docker-compose.admin.yml up -d
 | --- | --- |
 | Configuration | `opencode.jsonc` through forms — model and defaults, agents, slash commands, MCP servers, permissions and policies, plugins — or as raw text in the Advanced tab, where comments survive |
 | Users | create accounts, set passwords, generate API keys (shown once) or register an existing one — e.g. the employee's Bifrost virtual key, so one key serves both — disable, sign out everywhere, delete |
+| Variables | values for `{env:NAME}`, for everyone or per employee — e.g. each person's own provider key, so it is never written in the file ([guide](docs/VARIABLES.md)) |
 | Skills | create skills, edit their files, see what is published and at which version |
 | Installer | `bootstrap/install.sh`, checked with `bash -n` before it is saved |
 
@@ -231,9 +236,10 @@ config/
   bootstrap/install.sh    third-party tooling that must exist as a local binary
 ```
 
-Two placeholders are resolved server side: `{server_url}` and `{session_token}`.
-`{env:NAME}` and `{file:path}` are passed through for the harness to resolve on
-the employee's machine.
+Placeholders: `{server_url}` and `{session_token}` are resolved here;
+`{env:NAME}` is filled in here when the Variables page defines `NAME` for that
+employee, and otherwise left, like `{file:path}`, for OpenCode to resolve on the
+employee's machine. All of it in [`docs/VARIABLES.md`](docs/VARIABLES.md).
 
 > Write access to `config/` is equivalent to code execution on every employee's
 > machine — `plugins[]` runs in their harness, `install.sh` runs on their shell.
@@ -242,7 +248,7 @@ the employee's machine.
 ## Tests
 
 ```bash
-pytest                              # 268 tests
+pytest                              # 299 tests
 pytest tests/test_login_e2e.py      # the real login script against a real server
 pytest tests/test_harness_schema.py # the served document against OpenCode's own schema
 ```
@@ -263,6 +269,7 @@ Two suites check more than our own assumptions:
 | | |
 | --- | --- |
 | [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | the harness contract, verified against the v2 sources, with `file:line` references |
+| [`docs/VARIABLES.md`](docs/VARIABLES.md) | the placeholders you can use, per-employee values, provider keys and Bifrost as the LLM gateway |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | the admin panel, accounts, revocation, publishing skills, rotating secrets, troubleshooting |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | trust model, what a leaked token buys, hardening checklist |
 | [`docs/MIGRATION.md`](docs/MIGRATION.md) | what changed from 1.x and why that design could not work |
