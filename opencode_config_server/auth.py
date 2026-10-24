@@ -195,16 +195,23 @@ class UserStore:
             raise AuthError(f"account {name!r} is disabled")
         return user
 
-    def authenticate_api_key(self, key: str) -> User:
+    def find_api_key(self, key: str) -> User | None:
+        """The account `key` is registered to, disabled or not; None if nobody's."""
         self.reload()
         candidate = hash_api_key(key)
         for user in self._users.values():
             for stored in user.api_key_hashes:
                 if hmac.compare_digest(stored, candidate):
-                    if user.disabled:
-                        raise AuthError(f"account {user.name!r} is disabled")
                     return user
-        raise AuthError("invalid API key")
+        return None
+
+    def authenticate_api_key(self, key: str) -> User:
+        user = self.find_api_key(key)
+        if user is None:
+            raise AuthError("invalid API key")
+        if user.disabled:
+            raise AuthError(f"account {user.name!r} is disabled")
+        return user
 
 
 class BifrostUnavailable(Exception):

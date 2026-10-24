@@ -95,6 +95,18 @@ or Bifrost being unreachable, is a `503`, not a bad credential.
 The session belongs to `vk:<virtual key name>`. Those names cannot be created in
 `users.json`, so a Bifrost key can never pose as a local account.
 
+**A virtual key registered to an account** (pasted in the admin panel, or its
+digest added to `api_keys` by hand) signs in as that account instead: the
+session is revocable from `users.json` like any other, and lasts
+`OCS_TOKEN_TTL_DAYS`. When `OCS_BIFROST_URL` is set, Bifrost must still report
+the key active as well, so switching it off in Bifrost stops the next sign-in;
+without it, the key is just an API key. A disabled account is refused whatever
+Bifrost says.
+
+Reusing a key from another service ties the two together: whoever obtains it
+gets both. Only its unsalted SHA-256 is stored here, which is why pasted keys
+need at least 20 characters — a real virtual key has 42.
+
 There is no `users.json` entry to revoke, which is the trade-off: **disabling a
 virtual key in Bifrost stops new sign-ins, not sessions already issued.** Those
 live until `OCS_VK_TOKEN_TTL_DAYS` (7 by default), which is why they are short.

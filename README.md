@@ -113,7 +113,7 @@ docker compose -f docker-compose.yml -f docker-compose.admin.yml up -d
 | Section | What it edits |
 | --- | --- |
 | Configuration | `opencode.jsonc` through forms — model and defaults, agents, slash commands, MCP servers, permissions and policies, plugins — or as raw text in the Advanced tab, where comments survive |
-| Users | create accounts, set passwords, issue API keys (shown once), disable, sign out everywhere, delete |
+| Users | create accounts, set passwords, generate API keys (shown once) or register an existing one — e.g. the employee's Bifrost virtual key, so one key serves both — disable, sign out everywhere, delete |
 | Skills | create skills, edit their files, see what is published and at which version |
 | Installer | `bootstrap/install.sh`, checked with `bash -n` before it is saved |
 

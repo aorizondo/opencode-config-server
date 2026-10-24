@@ -1153,17 +1153,32 @@
       render();
     };
 
+    const existingKeyInput = () => h("input", {
+      type: "password", id: uid(), autocomplete: "off", spellcheck: "false", placeholder: "sk-bf-… or any key, 20+ characters",
+    });
+    const existingKeyHint = () => (data.bifrost
+      ? "Paste a key issued elsewhere — e.g. the employee's Bifrost virtual key — so one key works for both. A Bifrost key must also stay active in Bifrost. Only a digest is stored."
+      : "Paste a key issued elsewhere — e.g. the employee's Bifrost virtual key — so one key works for both. Only a digest is stored.");
+
     const addUser = () => {
       const name = h("input", { type: "text", spellcheck: "false", autocomplete: "off", placeholder: "ana.ruiz" });
       const password = h("input", { type: "password", autocomplete: "new-password" });
-      let withKey = false;
+      const ownKey = existingKeyInput();
+      const ownKeyField = field("Existing key", ownKey, existingKeyHint());
+      ownKeyField.hidden = true;
+      let keyMode = "none";
       const error = h("p", { class: "form-error", role: "alert", hidden: true });
       modal({
         title: "Add a user",
         body: [
           field("Username", name, "Letters, digits and . _ @ + - — what they type on the sign-in page."),
           field("Password", password, "Optional, at least 12 characters. Leave empty for an API-key-only account."),
-          h("div", { class: "checks" }, checkbox("Create an API key now", false, (value) => { withKey = value; })),
+          field("API key", select([["none", "No API key"], ["generate", "Generate a new key"], ["own", "Use an existing key"]], keyMode, (value) => {
+            keyMode = value;
+            ownKeyField.hidden = value !== "own";
+            if (value === "own") ownKey.focus();
+          })),
+          ownKeyField,
           error,
         ],
         actions: [
@@ -1172,7 +1187,12 @@
             label: "Add user", kind: "primary",
             onClick: async () => {
               try {
-                const result = await api("POST", "/users", { name: name.value.trim(), password: password.value || null, api_key: withKey });
+                const result = await api("POST", "/users", {
+                  name: name.value.trim(),
+                  password: password.value || null,
+                  api_key: keyMode === "generate",
+                  api_key_value: keyMode === "own" ? ownKey.value : null,
+                });
                 await reload();
                 toast(`Added ${result.user.name}.`);
                 if (result.api_key) apiKeyDialog(result.user.name, result.api_key);
@@ -1208,6 +1228,7 @@
       const base = `/users/${enc(user.name)}`;
       const renderManage = () => {
         const password = h("input", { type: "password", autocomplete: "new-password", placeholder: "new password, 12+ characters", "aria-label": "New password" });
+        const pasted = existingKeyInput();
         put(body, 
           h("section", {},
             h("h3", { text: "Password" }),
@@ -1233,13 +1254,24 @@
                   },
                 })))
               : h("p", { class: "hint", text: "No API keys." }),
-            h("button", {
-              type: "button", class: "btn small", text: "+ New API key",
-              onclick: async () => {
-                const result = await act("POST", `${base}/api-keys`, undefined);
-                if (result) apiKeyDialog(user.name, result.api_key);
-              },
-            })),
+            h("div", { class: "editor-actions" },
+              h("button", {
+                type: "button", class: "btn small", text: "+ Generate a key",
+                onclick: async () => {
+                  const result = await act("POST", `${base}/api-keys`, undefined);
+                  if (result) apiKeyDialog(user.name, result.api_key);
+                },
+              })),
+            h("div", { class: "field paste-key" },
+              h("label", { for: pasted.id, text: "Or register an existing key" }),
+              h("div", { class: "inline-form" }, pasted,
+                h("button", {
+                  type: "button", class: "btn", text: "Add",
+                  onclick: async () => {
+                    if (await act("POST", `${base}/api-keys`, { key: pasted.value }, "Key registered. It now signs in as this user.")) pasted.value = "";
+                  },
+                })),
+              h("p", { class: "hint", text: existingKeyHint() }))),
           h("section", {},
             h("h3", { text: "Sessions" }),
             h("p", { class: "hint", text: "Ends every OpenCode session of this user on every machine at once; they must run opencode auth login again." }),
@@ -1282,7 +1314,9 @@
         h("td", {}, h("span", { class: user.disabled ? "chip err" : "chip ok", text: user.disabled ? "Disabled" : "Active" })),
         h("td", { class: "actions" }, h("button", { type: "button", class: "btn small", text: "Manage", onclick: () => manage(user) }))));
       put(main, 
-        pageHead("Users", "Accounts that sign in with a password or an API key. Bifrost virtual keys are checked against Bifrost and are not listed here.",
+        pageHead("Users", data.bifrost
+          ? "Accounts that sign in with a password or an API key. Any active Bifrost virtual key also signs in on its own; register it to a user here to manage and revoke it like an account."
+          : "Accounts that sign in with a password or an API key.",
           h("button", { type: "button", class: "btn", text: "History", onclick: () => openHistory("users", { title: data.file, onRestored: reload }).catch(fail) }),
           h("button", { type: "button", class: "btn primary", text: "Add user", disabled: !data.writable || Boolean(data.error), onclick: addUser })),
         data.writable ? null : readOnlyBanner("The user database", data.file),

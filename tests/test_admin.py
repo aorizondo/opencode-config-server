@@ -309,6 +309,34 @@ class TestUsers:
         assert (await panel.post("/auth/token", headers={"X-Api-Key": added["api_key"]})).status_code == 401
         assert (await browser.delete("/admin/api/users/ana.ruiz/api-keys/000000000000")).status_code == 404
 
+    async def test_an_existing_key_can_be_registered(self, browser, panel, config_dir):
+        own = "key-issued-by-another-service-0123"
+        created = await browser.post("/admin/api/users", json={"name": "ext.user", "api_key_value": own})
+        assert created.status_code == 200, created.text
+        assert created.json()["api_key"] is None, "a pasted key is never echoed back"
+        assert own not in (config_dir / "users.json").read_text(), "only the digest is stored"
+        issued = await panel.post("/auth/token", headers={"X-Api-Key": own})
+        assert issued.status_code == 200 and issued.json()["subject"] == "ext.user"
+
+        second = "another-existing-key-for-ana-456"
+        added = await browser.post("/admin/api/users/ana.ruiz/api-keys", json={"key": second})
+        assert added.status_code == 200 and added.json()["api_key"] is None
+        assert (await panel.post("/auth/token", headers={"X-Api-Key": second})).json()["subject"] == "ana.ruiz"
+
+    @pytest.mark.parametrize(
+        ("key", "status"),
+        [
+            ("short-key", 422),
+            ("has a space in the middle of it", 422),
+            (API_KEY, 409),  # already ci-runner's: a key must map to one account
+        ],
+    )
+    async def test_rejected_existing_keys(self, browser, key, status):
+        response = await browser.post("/admin/api/users/ana.ruiz/api-keys", json={"key": key})
+        assert response.status_code == status
+        created = await browser.post("/admin/api/users", json={"name": "other.user", "api_key_value": key})
+        assert created.status_code == status
+
     async def test_deleting_a_user(self, browser, panel, config_dir):
         assert (await browser.delete("/admin/api/users/ci-runner")).status_code == 200
         assert "ci-runner" not in users_on_disk(config_dir)
@@ -530,3 +558,64 @@ class TestSettings:
     def test_the_panel_assets_ship_with_the_package(self):
         text = (Path(__file__).parent.parent / "pyproject.toml").read_text(encoding="utf-8")
         assert re.search(r'"panel/\*"', text)
+
+
+# ------------------------------------------------------------------ Bifrost keys registered to accounts
+
+#: Real virtual keys are sk-bf- plus a UUID.
+ACTIVE_VK = "sk-bf-00000000-0000-4000-8000-00000000aaaa"
+INACTIVE_VK = "sk-bf-00000000-0000-4000-8000-00000000bbbb"
+
+
+@pytest.fixture
+def fake_bifrost():
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from .test_browser_login import FakeBifrost
+
+    class RealLengthKeys(FakeBifrost):
+        KEYS = {ACTIVE_VK: FakeBifrost.KEYS["sk-bf-active"], INACTIVE_VK: FakeBifrost.KEYS["sk-bf-inactive"]}
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RealLengthKeys)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+
+
+class TestRegisteredBifrostKeys:
+    """A Bifrost virtual key pasted into an account signs in as that account."""
+
+    async def register(self, client, key):
+        response = await client.post(
+            "/admin/api/users/ana.ruiz/api-keys", json={"key": key}, headers=BEARER
+        )
+        assert response.status_code == 200, response.text
+
+    async def test_without_bifrost_it_is_a_plain_api_key(self, panel):
+        await self.register(panel, ACTIVE_VK)
+        issued = await panel.post("/auth/token", headers={"X-Api-Key": ACTIVE_VK})
+        assert issued.status_code == 200 and issued.json()["subject"] == "ana.ruiz"
+
+    async def test_with_bifrost_it_signs_in_as_the_account_while_active(self, admin_settings, fake_bifrost):
+        app = create_app(replace(admin_settings, bifrost_url=fake_bifrost))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE) as client:
+            await self.register(client, ACTIVE_VK)
+            issued = await client.post("/auth/token", headers={"X-Api-Key": ACTIVE_VK})
+            assert issued.status_code == 200
+            assert issued.json()["subject"] == "ana.ruiz", "the account, not vk:<name>: revocable from users.json"
+
+    async def test_switched_off_in_bifrost_means_no_sign_in(self, admin_settings, fake_bifrost):
+        app = create_app(replace(admin_settings, bifrost_url=fake_bifrost))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE) as client:
+            await self.register(client, INACTIVE_VK)
+            rejected = await client.post("/auth/token", headers={"X-Api-Key": INACTIVE_VK})
+            assert rejected.status_code == 401 and "inactive" in rejected.json()["detail"]
+
+    async def test_a_disabled_account_wins_over_an_active_key(self, admin_settings, fake_bifrost):
+        app = create_app(replace(admin_settings, bifrost_url=fake_bifrost))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE) as client:
+            await self.register(client, ACTIVE_VK)
+            await client.patch("/admin/api/users/ana.ruiz", json={"disabled": True}, headers=BEARER)
+            rejected = await client.post("/auth/token", headers={"X-Api-Key": ACTIVE_VK})
+            assert rejected.status_code == 401 and "disabled" in rejected.json()["detail"]

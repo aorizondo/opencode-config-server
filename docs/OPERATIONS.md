@@ -41,7 +41,7 @@ Sign in with the token. The browser gets a session cookie that lasts
 | Section | Notes |
 | --- | --- |
 | Configuration | Forms for model and defaults, agents, commands, MCP servers, permissions and policies, plugins. Saving from a form rewrites `opencode.jsonc` as plain JSON, so its comments go (the panel asks first); the **Advanced** tab edits the file as text and keeps them. **Check & preview** shows the document exactly as employees receive it. |
-| Users | API keys are shown once, when created; only their digest is stored and the panel identifies them by a short fingerprint. **Sign out everywhere** bumps `version`. Unknown fields in `users.json` are preserved. A `users.json` that does not parse is never overwritten: fix it by hand first. |
+| Users | A generated API key is shown once; only its digest is stored and the panel identifies keys by a short fingerprint. **Register an existing key** instead to reuse one issued elsewhere — typically the employee's Bifrost virtual key, so the same key opens Bifrost and this server (see [SECURITY.md](SECURITY.md#bifrost-virtual-keys)). A key can belong to one account only. **Sign out everywhere** bumps `version`. Unknown fields in `users.json` are preserved. A `users.json` that does not parse is never overwritten: fix it by hand first. |
 | Skills | Only small text files with a published extension can be created or edited; other files in a skill folder are listed but never shown. Each save changes the skill's version, so employees re-download it. |
 | Installer | Refused if `bash -n` reports a syntax error. |
 

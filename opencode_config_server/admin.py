@@ -63,6 +63,10 @@ _USER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}$")
 #: A safe single path segment, as the harness requires for skill names.
 _SKILL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MIN_PASSWORD_LENGTH = 12
+#: Keys pasted from another service (a Bifrost virtual key, say). Only their
+#: unsalted SHA-256 is stored, so short guessable values are refused.
+MIN_CUSTOM_KEY_LENGTH = 20
+MAX_CUSTOM_KEY_LENGTH = 512
 #: Starlette renamed the constant (422 UNPROCESSABLE_CONTENT); the code is what matters.
 UNPROCESSABLE = 422
 SKILL_TEMPLATE = "---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\n"
@@ -120,7 +124,15 @@ class ConfigDraft(BaseModel):
 class NewUser(BaseModel):
     name: str
     password: str | None = None
+    #: Generate an API key for the new account.
     api_key: bool = False
+    #: Or register this existing key instead (e.g. the employee's Bifrost key).
+    api_key_value: str | None = None
+
+
+class NewApiKey(BaseModel):
+    #: An existing key to register; omitted, a new one is generated.
+    key: str | None = None
 
 
 class UserChange(BaseModel):
@@ -469,6 +481,27 @@ def install(
         audit(request, action)
         return outcome.get("value")
 
+    def custom_key(raw: str) -> str:
+        key = raw.strip()
+        if not MIN_CUSTOM_KEY_LENGTH <= len(key) <= MAX_CUSTOM_KEY_LENGTH:
+            raise HTTPException(
+                status_code=UNPROCESSABLE,
+                detail=f"API keys need {MIN_CUSTOM_KEY_LENGTH} to {MAX_CUSTOM_KEY_LENGTH} characters",
+            )
+        if any(char.isspace() or not char.isprintable() for char in key):
+            raise HTTPException(status_code=UNPROCESSABLE, detail="API keys cannot contain spaces or control characters")
+        return key
+
+    def ensure_unassigned(entries: list[Any], stored: str) -> None:
+        """One key, one account: sign-in looks the key up, it must not be ambiguous."""
+        for entry in entries:
+            keys = entry.get("api_keys", []) if isinstance(entry, dict) else []
+            if stored in ([keys] if isinstance(keys, str) else keys):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"that key is already registered to {entry.get('name')!r}",
+                )
+
     def check_password(password: str) -> None:
         if len(password) < MIN_PASSWORD_LENGTH:
             raise HTTPException(
@@ -483,6 +516,7 @@ def install(
             "file": config.users_file.name,
             "writable": store.writable(config.users_file),
             "error": users.error,
+            "bifrost": bool(config.bifrost_url),
             "users": [],
         }
         try:
@@ -505,17 +539,21 @@ def install(
         if body.password:
             check_password(body.password)
             entry["password"] = await run_in_threadpool(hash_password, body.password)
-        key = generate_api_key() if body.api_key else None
+        # A pasted key is never echoed back: the admin already has it.
+        generated = generate_api_key() if body.api_key and not body.api_key_value else None
+        key = custom_key(body.api_key_value) if body.api_key_value else generated
         if key:
             entry["api_keys"] = [hash_api_key(key)]
 
         def add(entries: list[Any]) -> None:
             if any(isinstance(item, dict) and item.get("name") == name for item in entries):
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"{name!r} already exists")
+            if key:
+                ensure_unassigned(entries, entry["api_keys"][0])
             entries.append(entry)
 
         change_users(request, f"created user {name}", add)
-        return {"user": user_summary(entry), "api_key": key}
+        return {"user": user_summary(entry), "api_key": generated}
 
     @api.patch("/users/{name}")
     async def update_user(request: Request, name: str, body: UserChange) -> dict[str, Any]:
@@ -546,18 +584,21 @@ def install(
         return {"status": "deleted"}
 
     @api.post("/users/{name}/api-keys")
-    async def add_api_key(request: Request, name: str) -> dict[str, Any]:
-        key = generate_api_key()
+    async def add_api_key(request: Request, name: str, body: NewApiKey | None = None) -> dict[str, Any]:
+        pasted = body is not None and body.key is not None
+        key = custom_key(body.key) if pasted else generate_api_key()
         stored = hash_api_key(key)
 
         def add(entries: list[Any]) -> dict[str, Any]:
             entry = find(entries, name)
+            ensure_unassigned(entries, stored)
             keys = entry.get("api_keys", [])
             entry["api_keys"] = ([keys] if isinstance(keys, str) else list(keys)) + [stored]
             return user_summary(entry)
 
-        user = change_users(request, f"added an API key for {name}", add)
-        return {"user": user, "api_key": key, "fingerprint": key_fingerprint(stored)}
+        action = f"registered an existing API key for {name}" if pasted else f"added an API key for {name}"
+        user = change_users(request, action, add)
+        return {"user": user, "api_key": None if pasted else key, "fingerprint": key_fingerprint(stored)}
 
     @api.delete("/users/{name}/api-keys/{fingerprint}")
     async def remove_api_key(request: Request, name: str, fingerprint: str) -> dict[str, Any]:

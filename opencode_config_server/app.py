@@ -156,13 +156,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(error)) from error
 
     async def authenticate_key(key: str) -> User:
-        """A local API key, or a Bifrost virtual key checked live against Bifrost."""
+        """A key registered in users.json, or a Bifrost virtual key checked live.
+
+        A Bifrost key can also be registered to an account (pasted in the admin
+        panel), so one key serves both. It then signs in as that account --
+        revocable like any other -- and, when Bifrost is configured, Bifrost must
+        still report it active: switching it off there cuts the next sign-in.
+        """
         if not key.startswith(VIRTUAL_KEY_PREFIX):
             return users.authenticate_api_key(key)
+        registered = users.find_api_key(key)
+        if registered is not None and registered.disabled:
+            raise AuthError(f"account {registered.name!r} is disabled")
         if bifrost is None:
-            raise AuthError("Bifrost virtual keys are not accepted by this server")
+            if registered is None:
+                raise AuthError("Bifrost virtual keys are not accepted by this server")
+            return registered
         try:
-            return await run_in_threadpool(bifrost.authenticate, key)
+            checked = await run_in_threadpool(bifrost.authenticate, key)
+            return registered or checked
         except BifrostUnavailable as error:
             # Bifrost being down is not the employee's fault: no rate-limit strike.
             logger.error("cannot validate a virtual key: %s", error)
