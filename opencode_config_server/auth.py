@@ -140,7 +140,10 @@ class UserStore:
         except OSError:
             self._users = {}
             self._mtime = None
-            self._error = f"user database not found: {self.path}"
+            self._error = (
+                f"user database not found: {self.path} -- add the first user in the admin panel (/admin), "
+                "which creates it, or start from config/users.json.example"
+            )
             return
         if not force and self._mtime == mtime:
             return

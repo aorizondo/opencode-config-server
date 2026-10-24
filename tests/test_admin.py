@@ -354,6 +354,16 @@ class TestUsers:
         assert after["note"] == "managed by IT"
         assert users_on_disk(config_dir)["ana.ruiz"]["email"] == "ana@corp.example"
 
+    async def test_the_first_user_creates_users_json(self, browser, config_dir, panel):
+        (config_dir / "users.json").unlink()
+        listing = (await browser.get("/admin/api/users")).json()
+        assert listing["exists"] is False and listing["error"] is None, "a fresh server is not an error"
+        created = await browser.post("/admin/api/users", json={"name": "first.admin", "password": "a-long-password-1"})
+        assert created.status_code == 200
+        assert oct((config_dir / "users.json").stat().st_mode & 0o777) == "0o600"
+        assert (await panel.post("/auth/token", headers=basic("first.admin", "a-long-password-1"))).status_code == 200
+        assert (await browser.get("/admin/api/users")).json()["exists"] is True
+
     async def test_a_broken_users_json_is_never_overwritten(self, browser, config_dir):
         (config_dir / "users.json").write_text("{ broken", encoding="utf-8")
         response = await browser.post("/admin/api/users", json={"name": "someone"})

@@ -580,7 +580,9 @@ def install(
         state: dict[str, Any] = {
             "file": config.users_file.name,
             "writable": store.writable(config.users_file),
-            "error": users.error,
+            # Not there yet is not a problem here: adding the first user creates it.
+            "exists": data is not None,
+            "error": users.error if data is not None else None,
             "bifrost": bool(config.bifrost_url),
             "users": [],
         }

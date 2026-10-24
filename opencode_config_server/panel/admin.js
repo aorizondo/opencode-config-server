@@ -1435,6 +1435,9 @@
           h("button", { type: "button", class: "btn primary", text: "Add user", disabled: !data.writable || Boolean(data.error), onclick: addUser })),
         data.writable ? null : readOnlyBanner("The user database", data.file),
         data.error ? banner("error", "users.json has a problem", [data.error]) : null,
+        !data.exists && data.writable
+          ? banner("info", "No users yet", [`${data.file} does not exist yet; it is created (readable only by the server) when you add the first user.`])
+          : null,
         h("section", { class: "card" },
           rows.length
             ? h("table", { class: "list" },
