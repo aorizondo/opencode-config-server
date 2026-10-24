@@ -291,3 +291,39 @@ class TestBifrostVirtualKeys:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=off), base_url="https://cfg.corp.example") as c:
             denied = await c.get("/config/opencode.json", headers={"Authorization": f"Bearer {token}"})
             assert denied.status_code == 401
+
+
+class TestWithoutUsersJson:
+    """A fresh server, or one that only takes Bifrost keys, has no users.json."""
+
+    @pytest.fixture
+    async def fresh(self, settings, config_dir, bifrost_url):
+        (config_dir / "users.json").unlink()
+        app = create_app(replace(settings, bifrost_url=bifrost_url))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://cfg.corp.example") as c:
+            yield c
+
+    async def test_virtual_keys_sign_in(self, fresh):
+        issued = await fresh.post("/auth/token", headers={"X-Api-Key": "sk-bf-active"})
+        assert issued.status_code == 200 and issued.json()["subject"] == "vk:team-ana"
+        grant = await start(fresh)
+        approved = await fresh.post("/login/approve", json={"user_code": grant["user_code"], "api_key": "sk-bf-active"})
+        assert approved.status_code == 200
+
+    async def test_passwords_still_get_the_server_fault_answer(self, fresh):
+        """A users.json that went missing by accident must not read as "wrong
+        password" to every employee (tests/test_auth_token.py)."""
+        response = await fresh.post("/auth/token", headers={"Authorization": "Basic YW5hOnB3"})
+        assert response.status_code == 503
+
+    async def test_health_accepts_a_virtual_key_only_setup(self, fresh):
+        problems = (await fresh.get("/health")).json()["problems"]
+        assert not any("user" in problem for problem in problems)
+
+    async def test_a_broken_file_still_refuses_virtual_keys(self, settings, config_dir, bifrost_url):
+        """Unreadable users.json: a key might belong to a disabled account."""
+        (config_dir / "users.json").write_text("{ broken", encoding="utf-8")
+        app = create_app(replace(settings, bifrost_url=bifrost_url))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://cfg.corp.example") as c:
+            response = await c.post("/auth/token", headers={"X-Api-Key": "sk-bf-active"})
+            assert response.status_code == 503

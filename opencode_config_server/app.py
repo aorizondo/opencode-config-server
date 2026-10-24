@@ -149,7 +149,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise AuthError("session token has been revoked; run `opencode auth login` again")
         return claims
 
-    def check_database() -> None:
+    def check_database(*, virtual_key: bool = False) -> None:
+        if virtual_key and users.missing:
+            # No users.json at all (a fresh server, or one that only takes
+            # Bifrost keys): nothing can be registered to an account, so a
+            # virtual key needs nothing from it -- Bifrost decides. Passwords
+            # and local keys still get the 503 below: a file that went missing
+            # by accident must not read as "wrong password" to every employee.
+            return
         database_error = users.error
         if database_error:
             logger.error("user database problem: %s", database_error)
@@ -248,7 +255,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Exchange static credentials for a signed session token."""
         bucket = client_key(request)
         throttle(bucket)
-        check_database()
+        check_database(virtual_key=bool(x_api_key) and x_api_key.strip().startswith(VIRTUAL_KEY_PREFIX))
 
         try:
             if x_api_key:
@@ -349,7 +356,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """
         bucket = client_key(request)
         throttle(bucket)
-        check_database()
+        check_database(virtual_key=bool(body.api_key) and body.api_key.strip().startswith(VIRTUAL_KEY_PREFIX))
         try:
             devices.pending(body.user_code)
         except DeviceError as error:
@@ -442,10 +449,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health_report() -> dict[str, Any]:
         problems: list[str] = []
         users.reload(force=True)
-        if users.error:
+        if users.error and not users.missing:
             problems.append(users.error)
-        elif users.count() == 0:
-            problems.append("no users are configured")
+        elif users.count() == 0 and not config.bifrost_url:
+            # With Bifrost, virtual keys alone are a complete setup.
+            problems.append(users.error or "no users are configured")
         try:
             configdoc.load(config)
         except configdoc.ConfigError as error:

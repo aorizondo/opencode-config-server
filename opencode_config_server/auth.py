@@ -133,13 +133,16 @@ class UserStore:
         self._users: dict[str, User] = {}
         self._mtime: float | None = None
         self._error: str | None = None
+        self._missing = False
 
     def reload(self, *, force: bool = False) -> None:
         try:
             mtime = self.path.stat().st_mtime
+            self._missing = False
         except OSError:
             self._users = {}
             self._mtime = None
+            self._missing = True
             self._error = (
                 f"user database not found: {self.path} -- add the first user in the admin panel (/admin), "
                 "which creates it, or start from config/users.json.example"
@@ -179,6 +182,14 @@ class UserStore:
     def error(self) -> str | None:
         self.reload()
         return self._error
+
+    @property
+    def missing(self) -> bool:
+        """No users.json at all: a fresh server, or one that only takes Bifrost
+        virtual keys. Unlike a broken file, nothing is unknown -- there are
+        simply no local accounts."""
+        self.reload()
+        return self._missing
 
     def count(self) -> int:
         self.reload()

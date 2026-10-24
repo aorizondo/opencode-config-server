@@ -83,6 +83,12 @@ immediately; the employee's next login gets a fresh token.
 Plaintext in the `password` field is rejected, loudly: the server answers `503`
 and logs the offending user rather than authenticating anyone.
 
+No `users.json` at all is a valid state: a fresh server (the first user added
+in the admin panel creates it), or a company that signs in only with Bifrost
+virtual keys, which work without it. Passwords and local API keys then get a
+`503` rather than a `401`, so a file that went missing by accident never reads
+as "wrong password" to every employee.
+
 A broken `users.json` keeps the last good snapshot in memory and logs an error,
 so a typo during an edit does not lock the company out. If there is no usable
 snapshot at all, `/auth/token` answers `503` — never `401`, which would send
